@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import queue
+import threading
 import time
 from array import array
 from collections import deque
@@ -43,6 +45,46 @@ class EngineState:
     sha256: Optional[str] = None
 
 
+class _AsyncHasher:
+    """SHA-256 on a worker thread so hashing overlaps the next read (hashlib releases the GIL).
+
+    update() copies the chunk (the read buffer is reused) and queues it; order is preserved by the
+    single worker. Use as a context manager: exit drains the queue and joins the thread, so
+    hexdigest() is valid afterwards. enabled=False makes every method a no-op."""
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self._h = hashlib.sha256() if enabled else None
+        self._q: queue.Queue = queue.Queue(maxsize=8)  # bounds memory to ~8 chunks
+        self._t = None
+
+    def __enter__(self):
+        if self.enabled:
+            self._t = threading.Thread(target=self._work, name="nandwash-hash", daemon=True)
+            self._t.start()
+        return self
+
+    def _work(self) -> None:
+        while True:
+            data = self._q.get()
+            if data is None:
+                return
+            self._h.update(data)
+
+    def update(self, buf) -> None:
+        if self.enabled:
+            self._q.put(bytes(buf))
+
+    def __exit__(self, *exc):
+        if self._t is not None:
+            self._q.put(None)
+            self._t.join()
+        return False
+
+    def hexdigest(self) -> str:
+        return self._h.hexdigest()
+
+
 def _ts() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
@@ -65,8 +107,7 @@ def run(device_path: str, mode: str, start_offset: int = 0, chunk_size: int = 10
     start_offset -= start_offset % block
 
     nchunks = -(-total // chunk_size)
-    hasher = hashlib.sha256() if hash_data else None
-    if hasher and start_offset:
+    if hash_data and start_offset:
         raise ValueError("hashing needs a whole-device pass; it cannot be combined with resume")
 
     log: deque = deque(maxlen=10)
@@ -90,7 +131,7 @@ def run(device_path: str, mode: str, start_offset: int = 0, chunk_size: int = 10
     emit(f"{mode} started at offset {start_offset}" + (" (resumed)" if resume else ""))
     yield st
 
-    with DirectDevice(info.path, writable=(mode == "refresh")) as dev:
+    with DirectDevice(info.path, writable=(mode == "refresh")) as dev, _AsyncHasher(hash_data) as hasher:
         offset = start_offset
         while offset < total:
             # --- SMART poll + temperature throttle -------------------------
@@ -122,7 +163,7 @@ def run(device_path: str, mode: str, start_offset: int = 0, chunk_size: int = 10
             except OSError:
                 buf = None
                 st.latency_us[offset // chunk_size] = 0.0
-            if buf is not None and hasher is not None:
+            if buf is not None:
                 hasher.update(buf)
             if buf is not None:
                 st.good_bytes += size
@@ -164,7 +205,7 @@ def run(device_path: str, mode: str, start_offset: int = 0, chunk_size: int = 10
         if mode == "refresh":
             dev.sync()
 
-    if hasher is not None and not st.error_sectors:
+    if hash_data and not st.error_sectors:
         st.sha256 = hasher.hexdigest()
     st.smart_after = poll_smart(info.path) or st.smart
     st.smart = st.smart_after
