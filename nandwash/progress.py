@@ -40,3 +40,37 @@ def delete(serial: str) -> None:
         state_path(serial).unlink()
     except OSError:
         pass
+
+
+# --- latency sidecar (float32 per chunk, microseconds; 0 = not measured) -------------------
+def latency_path(serial: str) -> Path:
+    return state_path(serial).with_suffix(".lat")
+
+
+def save_latency(serial: str, arr) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    p = latency_path(serial)
+    tmp = p.with_suffix(".lat.tmp")
+    with open(tmp, "wb") as f:
+        arr.tofile(f)
+    os.replace(tmp, p)
+
+
+def load_latency(serial: str, n: int):
+    from array import array
+    arr = array("f", [0.0]) * n
+    try:
+        with open(latency_path(serial), "rb") as f:
+            raw = array("f")
+            raw.fromfile(f, n)
+            arr = raw
+    except (OSError, EOFError):
+        pass
+    return arr
+
+
+def delete_latency(serial: str) -> None:
+    try:
+        latency_path(serial).unlink()
+    except OSError:
+        pass

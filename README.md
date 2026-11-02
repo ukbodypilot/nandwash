@@ -44,6 +44,18 @@ With `sudo`, pipx-installed tools may not be on root's `PATH`; use `sudo $(which
 
 Progress is saved to `~/.nandwash/<serial>.json` every 60 s and on Ctrl+C; use `--resume` to continue. The file is removed on successful completion. A before/after SMART comparison is printed at the end.
 
+## Is it actually working?
+
+Charge decay is invisible to the host (the drive's ECC hides it), so nandwash measures proxies and tells you plainly when it can't prove anything:
+
+1. **Read latency map.** Every chunk's read time is recorded (`time.perf_counter_ns`; each run saves a report in `~/.nandwash/reports/`). Decayed cells need ECC retries and read from slower. Run `scan`, `refresh`, `scan`, then `nandwash compare first.json last.json` to see whether the slow chunks got faster.
+2. **Control run.** Latency is noisy, so do two scans with no refresh between them first; only differences bigger than that are meaningful.
+3. **Did the drive rewrite anything?** After a refresh, nandwash diffs the drive's write/erase/program counters and warns if none moved (the drive may have skipped identical writes).
+4. **ECC/SMART.** The full SMART attribute table is stored before/after and every changed counter is listed.
+5. **Integrity.** `--hash` SHA-256s everything read; `compare` confirms the data is unchanged.
+
+If the drive has no slow regions to begin with, there is nothing for a refresh to visibly improve, and `compare` says so. Note that under `sudo`, `~` is root's home unless your sudo keeps `HOME`; reports and resume state live there.
+
 ## Warning
 
 **Refresh mode writes to the device.** A power cut or hardware fault mid-write can lose data. Back up anything critical first. nandwash refuses to refresh a device that has mounted filesystems, refuses rotational drives, and refuses to run without root. Use at your own risk.

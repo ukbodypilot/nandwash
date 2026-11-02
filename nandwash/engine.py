@@ -1,7 +1,9 @@
 """Core scan/refresh loop."""
 from __future__ import annotations
 
+import hashlib
 import time
+from array import array
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,6 +37,10 @@ class EngineState:
     start_offset: int = 0
     throttled: bool = False
     finished: bool = False
+    chunk_size: int = 0
+    # per-chunk read latency in microseconds, indexed by offset // chunk_size (0 = not measured)
+    latency_us: Optional[array] = None
+    sha256: Optional[str] = None
 
 
 def _ts() -> str:
@@ -43,7 +49,8 @@ def _ts() -> str:
 
 def run(device_path: str, mode: str, start_offset: int = 0, chunk_size: int = 1048576,
         max_temp: int = 70, resume: Optional[dict] = None,
-        info: Optional[DeviceInfo] = None) -> Iterator[EngineState]:
+        info: Optional[DeviceInfo] = None, latency: Optional[array] = None,
+        hash_data: bool = False) -> Iterator[EngineState]:
     """Scan or refresh a device, yielding an EngineState after every chunk.
 
     `resume` may carry error_sectors/good_bytes/written_bytes/retry_count/smart_before
@@ -57,9 +64,16 @@ def run(device_path: str, mode: str, start_offset: int = 0, chunk_size: int = 10
     chunk_size = max(block, chunk_size - chunk_size % block)
     start_offset -= start_offset % block
 
+    nchunks = -(-total // chunk_size)
+    hasher = hashlib.sha256() if hash_data else None
+    if hasher and start_offset:
+        raise ValueError("hashing needs a whole-device pass; it cannot be combined with resume")
+
     log: deque = deque(maxlen=10)
     st = EngineState(mode=mode, device_path=info.path, total_bytes=total,
-                     current_offset=start_offset, start_offset=start_offset)
+                     current_offset=start_offset, start_offset=start_offset,
+                     chunk_size=chunk_size,
+                     latency_us=latency if latency is not None and len(latency) == nchunks else array("f", [0.0]) * nchunks)
     if resume:
         st.error_sectors = list(resume.get("error_sectors", []))
         st.good_bytes = resume.get("good_bytes", 0)
@@ -101,10 +115,15 @@ def run(device_path: str, mode: str, start_offset: int = 0, chunk_size: int = 10
             st.throttled = False
 
             size = min(chunk_size, total - offset)
+            t0 = time.perf_counter_ns()
             try:
                 buf = dev.read(offset, size)
+                st.latency_us[offset // chunk_size] = (time.perf_counter_ns() - t0) / 1000.0
             except OSError:
                 buf = None
+                st.latency_us[offset // chunk_size] = 0.0
+            if buf is not None and hasher is not None:
+                hasher.update(buf)
             if buf is not None:
                 st.good_bytes += size
                 if mode == "refresh":
@@ -145,6 +164,8 @@ def run(device_path: str, mode: str, start_offset: int = 0, chunk_size: int = 10
         if mode == "refresh":
             dev.sync()
 
+    if hasher is not None and not st.error_sectors:
+        st.sha256 = hasher.hexdigest()
     st.smart_after = poll_smart(info.path) or st.smart
     st.smart = st.smart_after
     st.finished = True
