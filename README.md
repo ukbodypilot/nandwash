@@ -37,7 +37,22 @@ sudo nandwash run --drives all --goal check --background # under systemd-run; su
 nandwash status [--json]                                 # follow the running (or latest) job
 sudo nandwash resume | cancel                            # Ctrl+C / systemctl stop pause; a kill is resumable too
 sudo nandwash alias sdc backup-tb                        # name a drive; use the name in --drives
+nandwash results [DRIVE] [--history] [--json]           # health card per drive, or one line per drive
 ```
+
+Every job ends with a verdict per drive:
+
+- **State**: `errors` (unreadable sectors, or a SMART error counter rose: back up), `inconclusive` (scan
+  incomplete, or the drive's own re-read noise is too wide to judge), `slow-regions` (at least
+  max(20, 0.01% of chunks) are still slow on a re-read, or 5 or more are above 3x the median), or `healthy`.
+  Slow means more than 1.8x the drive's median read time, both in the scan and again on a re-read.
+- **Outcome** after a refresh: `improved` (at least 80% of rewritten chunks fixed: back under 1.8x the median
+  and at least 30% faster), `partly`, `no-effect` (the drive may skip identical writes), or `incomplete` (chunks
+  that hold data wait for the offline boot).
+
+`run` exits 0 (healthy/improved), 1 (slow/partly/no-effect/incomplete), 2 (inconclusive) or 3 (errors), and
+`--on-result CMD` pipes the results JSON into your own command (mail, ntfy, Home Assistant...). History is
+kept per drive in `/var/lib/nandwash/history/`, including how many earlier fixes are slow again.
 
 Jobs run one drive at a time, check each drive again right before every write, and keep their state in
 `/var/lib/nandwash/` (jobs, reports, progress, aliases). Reports from older versions in `~/.nandwash` are

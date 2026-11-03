@@ -400,6 +400,11 @@ def _job_summary(job) -> None:
             if k in r and r[k].get("chunks_ok"):
                 console.print(f"  {d['name']}: {k.replace('_', ' ')}: {r[k]['chunks_ok']} chunks, median read "
                               f"{r[k].get('median_before_ms')} -> {r[k].get('median_after_ms')} ms", highlight=False)
+        if d.get("health") or r.get("outcome"):
+            from .results import _c
+            oc = r.get("outcome") or {}
+            console.print(f"  {d['name']}: {_c(d.get('health'))}" + (f", refresh {_c(oc.get('outcome'))} "
+                          f"({oc['fixed']}/{oc['rewritten']} fixed)" if oc else ""), highlight=False)
         q = r.get("queue_offline")
         if q and q.get("chunks"):
             console.print(f"  [bold]{d['name']}: {q['chunks']} slow chunks hold data and wait for the offline boot.[/]"
@@ -450,10 +455,7 @@ def _run_job(job, background: bool, max_temp: int) -> None:
         except jobs.JobError as e:
             raise click.ClickException(str(e))
     _job_summary(job)
-    if job["state"] == "paused":
-        sys.exit(130)
-    if job["state"] == "failed" or any(d["status"] == "failed" for d in job["drives"]):
-        sys.exit(1)
+    sys.exit(jobs.exit_code(job))
 
 
 @main.command("run")
@@ -463,7 +465,8 @@ def _run_job(job, background: bool, max_temp: int) -> None:
 @click.option("--background", is_flag=True, help="Run under systemd-run; watch with `nandwash status`.")
 @click.option("--yes", is_flag=True, help="Do not ask before writing (the SYSTEM disk still asks).")
 @click.option("--max-temp", default=70, show_default=True, help="Pause while a drive is hotter than this (°C).")
-def run_cmd(plan_file, drives_sel, goal, background, yes, max_temp):
+@click.option("--on-result", metavar="CMD", help="Run CMD (shell) when the job ends, results JSON on stdin.")
+def run_cmd(plan_file, drives_sel, goal, background, yes, max_temp, on_result):
     """Run a plan: a saved PLAN_FILE, or --drives/--goal made now. One drive at a time."""
     from . import plan as pl
     from .drives import enumerate_drives
@@ -494,6 +497,9 @@ def run_cmd(plan_file, drives_sel, goal, background, yes, max_temp):
     if p.writes:
         _confirm_writes(pairs, yes)
     job = jobs.create(p)
+    if on_result:
+        job["on_result"] = on_result
+        jobs.save(job)
     _run_job(job, background, max_temp)
 
 
@@ -509,8 +515,8 @@ def job_run_cmd(job_id, max_temp):
     signal.signal(signal.SIGTERM, _term)
     signal.signal(signal.SIGHUP, _term)
     job = jobs.load(job_id)
-    st = jobs.Runner(job, log=lambda s: print(s, flush=True), max_temp=max_temp).run()
-    sys.exit(0 if st == "done" else 1)
+    jobs.Runner(job, log=lambda s: print(s, flush=True), max_temp=max_temp).run()
+    sys.exit(jobs.exit_code(job))     # a drive with errors fails the unit: visible in `systemctl --failed`
 
 
 def _pick_job(job_id):
@@ -594,6 +600,55 @@ def cancel_cmd(job_id):
         console.print(f"job {job['id']} cancelled")
     else:
         console.print(f"job {job['id']} is already {st}")
+
+
+# ---------- results (B4-B6) ----------
+@main.command("results")
+@click.argument("drive", required=False)
+@click.option("--history", "show_history", is_flag=True, help="Every run of DRIVE, plus sparklines.")
+@click.option("--json", "as_json", is_flag=True, help="Versioned JSON (`nandwash_result`: 1) for scripts.")
+def results_cmd(drive, show_history, as_json):
+    """Health card of DRIVE (id, alias, serial or device name), or one line per drive."""
+    import json
+    from rich.table import Table
+    from rich import box
+    from . import history as hist, results as res
+    if drive:
+        h = res.find(drive)
+        if not h:
+            raise click.ClickException(f"no results for {drive!r} yet (run `sudo nandwash run --drives {drive} "
+                                       "--goal check`)")
+        hs = [h]
+    else:
+        if show_history:
+            raise click.UsageError("--history needs a DRIVE")
+        hs = hist.all_drives()
+    if as_json:
+        click.echo(json.dumps(res.to_json(hs, full=show_history), indent=1))
+        return
+    if not hs:
+        console.print("No results yet. Start with: sudo nandwash   (or `sudo nandwash run --drives all --goal check`)")
+        return
+    if not drive:
+        t = Table(box=box.SIMPLE_HEAD, pad_edge=False)
+        for c in ("ID", "Alias", "Model", "State", "Outcome", "Slow", "Last run"):
+            t.add_column(c)
+        for h in hs:
+            t.add_row(*res.one_line(h))
+        console.print(t)
+        return
+    h = hs[0]
+    for label, text in res.card(h):
+        console.print(f"{label:<8} {text}" if label else text, highlight=False)
+    if show_history:
+        t = Table(box=box.SIMPLE_HEAD, pad_edge=False)
+        for c in ("Date", "Goal", "State", "Median ms", "Cand.", "Slow", "Fixed", "Outcome", "Slow again"):
+            t.add_column(c, no_wrap=c in ("Date", "Goal", "State"))
+        for row in res.history_rows(h):
+            t.add_row(*row)
+        console.print(t)
+        console.print(f"slow chunks  {res.spark([r.get('confirmed') for r in h['runs']])}\n"
+                      f"median       {res.spark([r.get('median_ms') for r in h['runs']])}", highlight=False)
 
 
 @main.command()

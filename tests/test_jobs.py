@@ -13,6 +13,7 @@ class FakeOps:
     def __init__(self, pause_scans=0, slow=(0, 1048576), used=(1048576,)):
         self.calls, self.pause_scans, self.slow, self.used = [], pause_scans, list(slow), set(used)
         self.progress = set()
+        self.after_ms = 1.2
 
     def saved_progress(self, serial, mode):
         return {"mode": mode} if (serial, mode) in self.progress else None
@@ -34,7 +35,7 @@ class FakeOps:
     def find_scan_report(self, serial):
         return None
 
-    def pick(self, scan, d):
+    def pick(self, scan, d, prev_counters=None):
         self.calls.append(("pick", d.serial, scan))
         res = {"offsets": self.slow, "candidates": 5, "chunk_size": 1048576, "median_us": 1000.0}
         return res, pick.verdict(res, [3000.0] * 10, 10)
@@ -42,15 +43,20 @@ class FakeOps:
     def live_free(self, d, offsets, log, should_stop):
         self.calls.append(("live", d.serial, tuple(offsets)))
         plan = [{"offset": o, "state": "used" if o in self.used else "free"} for o in offsets]
-        return {"plan": plan, "chunks_ok": sum(r["state"] == "free" for r in plan), "states": {}, "stopped": None}
+        rows = [{"offset": r["offset"], "status": "ok", "before_ms": 7.0, "after_ms": 1.2} for r in plan
+                if r["state"] == "free"]
+        return {"plan": plan, "chunks_ok": len(rows), "states": {}, "stopped": None, "results": rows}
 
     def rewrite(self, d, offsets, log, should_stop):
         self.calls.append(("rewrite", d.serial, tuple(offsets)))
+        rows = [{"offset": o, "status": "ok", "before_ms": 7.0, "after_ms": self.after_ms} for o in offsets]
         return {"chunks_ok": len(offsets), "chunks_requested": len(offsets), "median_before_ms": 7.0,
-                "median_after_ms": 2.0, "stopped": None}
+                "median_after_ms": self.after_ms, "stopped": None, "results": rows}
 
 
-class Jobs(unittest.TestCase):
+class JobsBase(unittest.TestCase):
+    """Temp state dir + the Selectors drives; no tests of its own."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self._old = state.VAR_DIR, jobs.LOCK_PATH
@@ -71,6 +77,8 @@ class Jobs(unittest.TestCase):
     def runner(self, job, ops, ds=None):
         return jobs.Runner(job, ops=ops, enumerate_fn=lambda: ds if ds is not None else self.S.ds)
 
+
+class Jobs(JobsBase):
     def test_check_job(self):
         ops = FakeOps()
         j = self.job("sda,sdc", "check")

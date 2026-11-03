@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from array import array
 from datetime import datetime

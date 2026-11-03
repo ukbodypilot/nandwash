@@ -291,13 +291,13 @@ No email or chat integrations: each one is a dependency plus credentials to mana
 
 ### B8. Implementation steps (B)
 
-1. `health.py`: candidates, confirm, noise band, fixed, the state and outcome rules (pure functions over latency
+1. ~~done~~ `health.py`: candidates, confirm, noise band, fixed, the state and outcome rules (pure functions over latency
    arrays + re-read results; unit-tested on the sda numbers above as fixtures).
-2. Wire it into `check`/`refresh` jobs; the 200-chunk noise sample runs after every scan.
-3. `index.json` per drive; "slow again" tracking of earlier fixed offsets.
-4. `results` (card + one-line list + `--history`), `--json` schema + a test that pins it.
+2. ~~done~~ Wire it into `check`/`refresh` jobs; the 200-chunk noise sample runs after every scan.
+3. ~~done~~ (as `/var/lib/nandwash/history/<id>.json`; reports stay flat) `index.json` per drive; "slow again" tracking of earlier fixed offsets.
+4. ~~done~~ `results` (card + one-line list + `--history`), `--json` schema + a test that pins it.
 5. `report --html` with inline SVG, plus `--share`.
-6. Exit codes, `--on-result`, `nandwash-check.timer` + service shipped in `contrib/`.
+6. Exit codes + `--on-result` done (`_job-run` exits with the code, so a background job's unit fails on 1-3); still to do: `nandwash-check.timer` + service shipped in `contrib/`.
 7. ~~Calibrate the `slow-regions` line~~ done 2026-11-03 (B3); re-check on the mini's other two drives.
 
 ---

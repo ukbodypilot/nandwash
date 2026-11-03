@@ -2,7 +2,7 @@ import unittest
 
 from nandwash import plan as pl
 from nandwash import selection as sel
-from nandwash.drives import Drive, Partition, assign_ids, judge_caps, _judge, short_id
+from nandwash.drives import Drive, Partition, assign_ids, _judge, short_id
 
 
 def drive(name, serial, *, model="M", size=10**9, parts=(), transport="sata", rot=False, holders=(), tb=False,

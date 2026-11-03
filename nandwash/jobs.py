@@ -16,7 +16,7 @@ import time
 from datetime import datetime
 from typing import Callable, List, Optional
 
-from . import plan as pl, state
+from . import health, history as hist, plan as pl, state
 
 JOB_VERSION = 1
 LOCK_PATH = os.environ.get("NANDWASH_LOCK", "/run/nandwash.lock")
@@ -232,7 +232,20 @@ class Runner:
                         pass
                 job["pid"] = None
                 self.write()
+        if job["state"] in ("done", "failed") and job.get("on_result"):
+            self._on_result()
         return job["state"]
+
+    def _on_result(self) -> None:
+        """PLAN B7: the user's own command gets the results JSON on stdin. Its failure is logged, never fatal."""
+        import subprocess
+        try:
+            data = json.dumps(result_json(self.job))
+            r = subprocess.run(self.job["on_result"], shell=True, input=data, text=True, capture_output=True,
+                               timeout=300)
+            self.log(f"on-result exited {r.returncode}" + (f": {r.stderr.strip()[-300:]}" if r.returncode else ""))
+        except (OSError, subprocess.SubprocessError) as e:
+            self.log(f"on-result failed: {e}")
 
     def _run_drives(self) -> None:
         job = self.job
@@ -291,6 +304,51 @@ class Runner:
             jd["step"] += 1
             self.write()
         jd["status"], jd["progress"] = "done", {}
+        try:
+            self._finish(jd, d)
+        except Exception as e:              # the work is done; a history problem must not fail the drive
+            self.log(f"{d.name}: could not record the result: {e}")
+        self.write()
+
+    def _finish(self, jd: dict, d) -> None:
+        """PLAN B3/B5: the drive's state + refresh outcome, and one history row."""
+        r = jd["results"]
+        pk = r.get("pick") or {}
+        med_us = (pk.get("median_ms") or 0) * 1000.0
+        rows = []
+        for key in ("live_free", "rewrite_chunks"):
+            f = (r.get(key) or {}).get("file")
+            if f:
+                with open(f) as fh:
+                    rows += health.rewrite_rows(json.load(fh))
+        oc = health.outcome(rows, med_us, queued=len(r.get("offline_queue") or [])) if med_us else None
+        if oc:
+            r["outcome"] = {k: v for k, v in oc.items() if k != "fixed_offsets"}
+        scan = {}
+        src = (r.get("scan") or r.get("full_refresh") or {}).get("report") or pk.get("scan")
+        if src:
+            try:
+                with open(src) as fh:
+                    scan = json.load(fh)
+            except (OSError, ValueError):
+                pass
+        ls = scan.get("latency_stats") or {}
+        state_ = pk.get("state")
+        if not pk and scan:                  # refresh-full: no re-reads, only errors can be judged
+            n = len(scan.get("error_sectors") or [])
+            state_ = "errors" if n else None
+        row = {"date": _now(), "job": self.job["id"], "device": d.name, "goal": self.job["goal"], "steps": jd["steps"],
+               "scan_report": src, "complete": scan.get("complete"),
+               "median_ms": round(ls["p50"] / 1000, 3) if ls.get("p50") else None,
+               "p99_ms": round(ls["p99"] / 1000, 3) if ls.get("p99") else None,
+               "errors": len(scan.get("error_sectors") or []), "noise": pk.get("noise"),
+               "candidates": pk.get("candidates"), "confirmed": pk.get("confirmed"), "severe": pk.get("severe"),
+               "state": state_, "why": pk.get("why", ""), "slow_again": pk.get("slow_again"),
+               "smart_counters": pk.get("smart_counters") or health.smart_counters(scan.get("smart_after")),
+               "outcome": oc, "next": (r.get("queue_offline") or {}).get("next", "")}
+        jd["health"] = state_
+        jd["exit"] = health.exit_code(state_, (oc or {}).get("outcome"))
+        hist.add_run(jd["id"] or jd["serial"], jd["serial"], jd["model"], row)
 
     def _recheck(self, jd: dict, d, cap: str):
         """Right before a write: the scan may have taken hours, so look at the drive again."""
@@ -345,10 +403,13 @@ class Runner:
         scan = jd["results"].get("scan", {}).get("report") or self.ops.find_scan_report(d.serial)
         if not scan:
             raise RuntimeError("no scan report to pick from")
-        res, verdict = self.ops.pick(scan, d)
+        h = hist.load(jd["id"] or jd["serial"])
+        res, verdict = self.ops.pick(scan, d, prev_counters=hist.last_counters(h))
+        again = hist.slow_again(h, res["offsets"])
         jd["results"]["pick"] = {"file": self._out(jd, "slow", res), "scan": scan, "candidates": res["candidates"],
-                                 **verdict}
-        self.log(f"{d.name}: {verdict['confirmed']} confirmed slow ({verdict['severe']} above 3x): {verdict['state']}")
+                                 **verdict, "slow_again": again}
+        self.log(f"{d.name}: {verdict['confirmed']} confirmed slow ({verdict['severe']} above 3x): {verdict['state']}"
+                 + (f"; {again['count']} of {again['of']} earlier fixes slow again" if again else ""))
 
     def _offsets(self, jd) -> list:
         with open(jd["results"]["pick"]["file"]) as f:
@@ -395,6 +456,26 @@ class Runner:
             raise RuntimeError(res["stopped"])
 
 
+def exit_code(job: dict) -> int:
+    """PLAN B7 for a whole job: the worst drive. 130 paused, otherwise 0/1/2/3 (health.exit_code);
+    a drive that failed or was skipped counts as at least 1."""
+    st = effective_state(job)
+    if st in ("paused", "interrupted"):
+        return 130
+    worst = 0
+    for d in job["drives"]:
+        worst = max(worst, d.get("exit") or 0, 1 if d["status"] in ("failed", "skipped", "cancelled") else 0)
+    return worst
+
+
+def result_json(job: dict) -> dict:
+    from . import results
+    hs = [hist.load(d["id"] or d["serial"]) for d in job["drives"] if d["status"] == "done"]
+    out = results.to_json([h for h in hs if h["runs"]])
+    out.update(job=job["id"], job_state=job["state"], exit=exit_code(job))
+    return out
+
+
 class Ops:
     """The real work, behind one seam so the runner tests without hardware."""
 
@@ -410,11 +491,12 @@ class Ops:
         from .preboot import find_scan_report
         return find_scan_report(serial)
 
-    def pick(self, scan, d):
+    def pick(self, scan, d, prev_counters=None):
         from . import pick as pk, report as rpt
-        res, info = pk.pick_slow(scan, max_chunks=10 ** 9, expect_serial=d.serial, device=d.path, log=lambda s: None)
-        _rep, lat = rpt.load(scan)
-        return res, pk.verdict(res, lat, len(lat))
+        res, info = pk.pick_slow(scan, max_chunks=10 ** 9, expect_serial=d.serial, device=d.path, log=lambda s: None,
+                                 noise_n=health.NOISE_N)
+        rep, lat = rpt.load(scan)
+        return res, pk.verdict(res, lat, len(lat), rep=rep, prev_counters=prev_counters)
 
     @staticmethod
     def _guard(d):

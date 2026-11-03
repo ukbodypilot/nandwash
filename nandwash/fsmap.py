@@ -15,7 +15,7 @@ import os
 import struct
 import threading
 import time
-from typing import Iterator, List, Tuple
+from typing import List, Tuple
 
 _REC = struct.Struct("=IIQQqQ24s")   # device, flags, physical, owner, offset, length, reserved[3]
 _HEAD = struct.Struct("=IIII48s")    # iflags, oflags, count, entries, reserved[6]

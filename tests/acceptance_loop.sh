@@ -20,6 +20,9 @@ cleanup() {
 }
 trap cleanup EXIT
 fail() { echo "FAIL: $*"; exit 1; }
+# A job's exit code is its worst drive's verdict (0 healthy/improved, 1 slow/partly, 2 inconclusive, 3 errors);
+# blank loop images on a busy host can land anywhere in 0-2. Anything else (a crash, 130 paused) fails.
+runok() { local rc=0; "$@" || rc=$?; [ "$rc" -le 2 ] || { echo "exit $rc"; return 1; }; }
 js() { "$NW" status --json "$@" | python3 -c 'import json,sys; j=json.load(sys.stdin); print(eval(sys.argv[1]))' "$EXPR"; }
 
 for i in 1 2 3; do truncate -s 128M "$W/d$i.img"; LOOPS+=("$(losetup --show -f "$W/d$i.img")"); done
@@ -28,11 +31,25 @@ small=$(printf '%s,' "${LOOPS[@]:0:3}" | sed 's|/dev/||g; s|,$||'); big=$(basena
 echo "drives: $small  big: $big"
 
 echo "== 1. foreground check + refresh"
-"$NW" run --drives "$small" --goal check > "$W/1.out" 2>&1 || fail "check job: $(tail -3 "$W/1.out")"
+runok "$NW" run --drives "$small" --goal check --on-result "cat > $W/onresult.json" > "$W/1.out" 2>&1 || fail "check job: $(tail -3 "$W/1.out")"
 EXPR='[d["status"] for d in j["drives"]]'; [ "$(js)" = "['done', 'done', 'done']" ] || fail "check: $(js)"
-"$NW" run --drives "$small" --goal refresh --yes > "$W/2.out" 2>&1 || fail "refresh job: $(tail -3 "$W/2.out")"
+"$PY" - "$W/onresult.json" <<'PYCHK' || fail "--on-result got no results JSON"
+import json, sys
+j = json.load(open(sys.argv[1]))
+assert j["nandwash_result"] == 1 and len(j["drives"]) == 3 and j["job_state"] == "done", j
+print("   on-result:", [(d["id"], d["state"]) for d in j["drives"]], "exit", j["exit"])
+PYCHK
+runok "$NW" run --drives "$small" --goal refresh --yes > "$W/2.out" 2>&1 || fail "refresh job: $(tail -3 "$W/2.out")"
 EXPR='[d["steps"][-1] + ":" + d["status"] for d in j["drives"]]'
 [ "$(js)" = "['rewrite-chunks:done', 'rewrite-chunks:done', 'rewrite-chunks:done']" ] || fail "refresh: $(js)"
+"$NW" results > "$W/res.out" || fail "results list"
+[ "$(grep -c 'nw-' "$W/res.out")" = 3 ] || fail "results list: $(cat "$W/res.out")"
+one=$(grep -o 'nw-[0-9a-f]*' "$W/res.out" | head -1)
+"$NW" results "$one" --history > "$W/card.out" || fail "results card"
+grep -q "STATE" "$W/card.out" && grep -q "HISTORY" "$W/card.out" || fail "card: $(cat "$W/card.out")"
+"$NW" results --json | "$PY" -c 'import json,sys; j=json.load(sys.stdin); assert all(d["runs"] == 2 for d in j["drives"]), j' \
+  || fail "history should hold 2 runs per drive"
+cat "$W/card.out"
 
 wait_pct() {  # wait until the running job's drive passes $1 %
   for _ in $(seq 120); do
@@ -48,7 +65,7 @@ wait_pct 15; J=$(job_id)
 sleep 11                                    # past one 10 s checkpoint
 systemctl kill -s KILL "nandwash-job-$J"; sleep 1
 EXPR='j["effective_state"]'; [ "$(js "$J")" = interrupted ] || fail "after SIGKILL: $(js "$J")"
-"$NW" resume "$J" > "$W/r1.out" 2>&1 || fail "resume after kill: $(tail -3 "$W/r1.out")"
+runok "$NW" resume "$J" > "$W/r1.out" 2>&1 || fail "resume after kill: $(tail -3 "$W/r1.out")"
 EXPR='j["state"]'; [ "$(js "$J")" = done ] || fail "resumed job: $(js "$J")"
 
 echo "== 3. SIGTERM -> paused -> resume from the checkpoint"
