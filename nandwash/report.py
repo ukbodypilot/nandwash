@@ -59,6 +59,10 @@ def attribute_diff(before, after) -> list:
         return rows
     for aid in sorted(set(before.attributes) & set(after.attributes)):
         b, a = before.attributes[aid], after.attributes[aid]
+        name = a.get("name") or b.get("name") or ""
+        mask = 0xFFFFFFFF if re.search("msec", name, re.I) else 0xFF if re.search("temp|airflow", name, re.I) else None
+        if mask:  # vendors pack extra fields (ms, min/max temps) into the high bits
+            a = {**a, "raw": a["raw"] & mask}; b = {**b, "raw": b["raw"] & mask}
         try:
             d = a["raw"] - b["raw"]
         except (TypeError, KeyError):
