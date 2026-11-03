@@ -450,3 +450,60 @@ def compare(before, after):
 
 if __name__ == "__main__":
     main()
+
+
+@main.group()
+def preboot():
+    """The offline maintenance boot: check this machine, preview an install. (Nothing here writes anything.)"""
+
+
+_ICON = {"ok": "[green]ok[/]", "warn": "[yellow]WARN[/]", "fail": "[red]FAIL[/]", "info": "[dim]info[/]"}
+
+
+@preboot.command("check")
+@click.argument("device", required=False, type=click.Path(exists=True))
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def preboot_check(device, as_json):
+    """Can this machine run the maintenance boot? Read-only; prints a verdict and a reason per finding."""
+    from . import preboot as pb
+    rep = pb.check(device)
+    if as_json:
+        import json
+        click.echo(json.dumps(rep.to_dict(), indent=1))
+    else:
+        for c in rep.checks:
+            console.print(f"{_ICON[c.status]:>14}  [bold]{c.name}[/]: {c.detail}", highlight=False)
+        col = {"supported": "green", "supported-with-warnings": "yellow", "unsupported": "red"}[rep.verdict]
+        console.print(f"\nVerdict: [bold {col}]{rep.verdict}[/]")
+    sys.exit(0 if not rep.failures else 2)
+
+
+@preboot.command("install")
+@click.argument("device", required=False, type=click.Path(exists=True))
+@click.option("--dry-run", is_flag=True, help="Show exactly what would be written. Required: the real install is not enabled yet.")
+def preboot_install(device, dry_run):
+    """Preview installing the maintenance boot for DEVICE. Writes nothing."""
+    from . import preboot as pb
+    if not dry_run:
+        raise click.ClickException("the real install is not enabled yet; run with --dry-run to see what it would do.")
+    device = _choose_device(device)
+    rep = pb.check(device)
+    try:
+        pl = pb.plan(rep)
+    except ValueError as e:
+        for c in rep.checks:
+            if c.status in ("fail", "warn"):
+                console.print(f"{_ICON[c.status]:>14}  [bold]{c.name}[/]: {c.detail}", highlight=False)
+        raise click.ClickException(str(e))
+    for c in rep.warnings:
+        console.print(f"{_ICON['warn']:>14}  [bold]{c.name}[/]: {c.detail}", highlight=False)
+    console.print("\n[bold]DRY RUN: nothing has been written.[/] An install would:\n")
+    for fl in pl["files"]:
+        console.print(f"[bold]{fl['action']:>22}[/]  {fl['path']}  (mode {fl['mode']})", highlight=False)
+        for ln in fl["content"].rstrip("\n").split("\n"):
+            console.print(" " * 26 + ln, style="dim", highlight=False, markup=False)
+    console.print(f"\n[bold]To run it later:[/] {pl['run']}")
+    console.print("[bold]To undo:[/]")
+    for u in pl["undo"]:
+        console.print(f"  - {u}", highlight=False)
+    console.print("[bold]Left untouched:[/] " + "; ".join(pl["untouched"]))

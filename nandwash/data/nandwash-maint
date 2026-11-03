@@ -58,7 +58,8 @@ fi
 
 # 3. The work: scan -> confirm slow chunks -> rewrite them -> rescan -> compare. Every step is time-bounded;
 # a failed or timed-out step skips the steps that depend on it, never the save/reboot at the end.
-NW=/opt/nandwash/venv/bin/nandwash
+NW=${NW:-/opt/nandwash/venv/bin/nandwash}   # maint.conf may set NW; must live on the root filesystem
+NWPY=$(dirname "$NW")/python3
 export HOME=$W                                  # reports/progress go to tmpfs; root is read-only
 step() { # name timeout cmd...
   local n=$1 t=$2; shift 2
@@ -73,7 +74,7 @@ if step scan1 "${SCAN_LIMIT:-900}" $NW scan "$DEVICE"; then
   SCAN1=$(latest)
   if [ -n "$SCAN1" ] && step pick 600 $NW pick-slow "$SCAN1" $W/slow.json --expect-serial "$SERIAL"; then
     # Rewrite only what scan1 found persistently slow (the 60 metadata chunks were already done last boot).
-    N=$(/opt/nandwash/venv/bin/python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["offsets"]))' $W/slow.json 2>/dev/null)
+    N=$("$NWPY" -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["offsets"]))' $W/slow.json 2>/dev/null)
     if [ "${N:-0}" -gt 0 ]; then
       step fix "${FIX_LIMIT:-900}" $NW refresh-chunks "$DEVICE" $W/slow.json \
         --allow-readonly-mounts --yes --expect-serial "$SERIAL" --report $W/report.json --backup-dir $W/backup || RC=$?

@@ -49,7 +49,7 @@ sudo nandwash scan /dev/sdX && nandwash compare <before.json> <after.json>  # 4.
 free-space map (`FS_IOC_GETFSMAP`) whether the whole 1 MiB is free, (2) freezes the filesystem and asks again,
 (3) reads it twice, writes the same bytes back, syncs and reads back, (4) thaws (about 100 ms). A hard auto-thaw timer
 guards the freeze. Chunks holding file data or metadata are reported and never touched; for those use
-`refresh-chunks` on an unmounted/read-only drive (see `maintenance/` for an offline-boot runner). Partition tables,
+`refresh-chunks` on an unmounted/read-only drive (see "Offline maintenance boot" below). Partition tables,
 bootloader gaps, swap and other filesystems are always skipped. Needs Linux >= 5.10.
 
 `tests/live_loop_test.sh` stress-tests this on a disposable loop device while a writer churns the filesystem.
@@ -90,3 +90,19 @@ nandwash is inspired by SpinRite's approach but is Linux-native, SSD-focused (it
 ## License
 
 MIT
+
+## Offline maintenance boot (preview)
+
+Chunks that hold file data or metadata can only be rewritten with the filesystem not in use. The offline runner
+(`nandwash/data/nandwash-maint`) boots the machine once into a minimal PID 1 with the root filesystem read-only,
+scans, rewrites only the persistently slow chunks, rescans, saves a report and reboots.
+
+```
+sudo nandwash preboot check  [DEVICE]            # can this machine do it? verdict + a reason per finding
+sudo nandwash preboot install DEVICE --dry-run   # exactly which files / GRUB entry an install would write
+```
+
+Both are read-only. The real install is deliberately not enabled yet. Supported: GRUB with an ext2/3/4 or XFS root
+that is a plain partition, nandwash installed on the root filesystem, target drive on the internal bus. Anything
+else (systemd-boot, LUKS/LVM/RAID/btrfs/ZFS root, USB/Thunderbolt targets) is reported as unsupported with the
+reason. A missing hardware watchdog is a warning: the runner is then bounded by software time limits only.
