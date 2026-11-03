@@ -1,0 +1,18 @@
+# Monthly read-only health check of every drive nandwash can check (PLAN B5/B7).
+# Install:  sudo cp contrib/nandwash-check.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now nandwash-check.timer
+# Results:  nandwash results          Last run: systemctl status nandwash-check
+# Exit 1 (slow regions) is reported but does not fail the unit; 2 (inconclusive) and 3 (errors) do,
+# so a failing drive shows up in `systemctl --failed`. Add `--on-result CMD` to ExecStart for a notification.
+[Unit]
+Description=nandwash monthly drive health check (read-only)
+Documentation=https://github.com/ukbodypilot/nandwash
+ConditionACPower=true
+
+[Service]
+Type=oneshot
+# Change the path if nandwash is installed elsewhere (`command -v nandwash`).
+ExecStart=/usr/local/bin/nandwash run --drives all --goal check --yes
+SuccessExitStatus=1
+# No IOSchedulingClass=idle / low I/O priority: queued reads would look like slow chunks. The scan measures
+# latency, so it must compete normally; ConditionACPower and the random delay keep it out of the way instead.

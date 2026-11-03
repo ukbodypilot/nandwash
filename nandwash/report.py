@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from array import array
 from datetime import datetime
@@ -11,9 +10,12 @@ from typing import Optional
 
 from . import __version__
 from .engine import EngineState
-from .progress import STATE_DIR
+REPORT_DIR: Optional[Path] = None     # override (tests); default: state.VAR_DIR/reports
 
-REPORT_DIR = STATE_DIR / "reports"
+
+def report_dir() -> Path:
+    from . import state
+    return Path(REPORT_DIR) if REPORT_DIR else Path(state.VAR_DIR) / "reports"
 
 
 # ---- latency statistics ---------------------------------------------------------------
@@ -110,20 +112,22 @@ def build(st: EngineState, info, interrupted: bool) -> dict:
 
 
 def save(rep: dict, lat) -> Path:
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    rd = report_dir()
+    rd.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", rep["serial"])
     stamp = rep["created"].replace(":", "").replace("-", "")
-    base = REPORT_DIR / f"{safe}-{rep['mode']}-{stamp}"
-    n = 1
-    while base.with_suffix(".json").exists():  # never overwrite an earlier report
+    # Names are built by appending, never with_suffix(): a serial with a "." would lose everything after it.
+    base = f"{safe}-{rep['mode']}-{stamp}"
+    name, n = base, 1
+    while (rd / (name + ".json")).exists():  # never overwrite an earlier report
         n += 1
-        base = REPORT_DIR / f"{safe}-{rep['mode']}-{stamp}-{n}"
-    rep["latency_file"] = base.name + ".lat"
-    with open(base.with_suffix(".json"), "w") as f:
+        name = f"{base}-{n}"
+    rep["latency_file"] = name + ".lat"
+    with open(rd / (name + ".json"), "w") as f:
         json.dump(rep, f, indent=2)
-    with open(base.with_suffix(".lat"), "wb") as f:
+    with open(rd / (name + ".lat"), "wb") as f:
         lat.tofile(f)
-    return base.with_suffix(".json")
+    return rd / (name + ".json")
 
 
 def load(path: str):

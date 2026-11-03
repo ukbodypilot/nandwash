@@ -1,13 +1,16 @@
 name: publish
 
-# Pushing a tag like v0.1.0 builds the package and uploads it to PyPI. No token is stored anywhere:
-# PyPI trusts this workflow directly (a "trusted publisher" set up on pypi.org).
+# Pushing a tag like v0.4.0 builds the package and uploads it to PyPI. No token is stored anywhere:
+# PyPI trusts this workflow directly (a "trusted publisher" set up on pypi.org: owner ukbodypilot, repo nandwash,
+# workflow publish.yml, environment pypi). Off until that exists: set the repository variable PUBLISH_PYPI=true
+# (Settings > Secrets and variables > Actions > Variables) to turn it on; until then the job is skipped.
 on:
   push:
     tags: ["v*"]
 
 jobs:
   pypi:
+    if: vars.PUBLISH_PYPI == 'true'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

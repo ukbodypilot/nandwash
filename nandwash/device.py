@@ -52,12 +52,31 @@ class DeviceInfo:
         phys = int(_sys(name, "queue/physical_block_size") or 4096)
         rot = _sys(name, "queue/rotational") != "0"
         model = _sys(name, "device/model") or "unknown"
-        serial = _sys(name, "device/serial") or _sys(name, "serial")
-        if not serial:
-            serial = _udev_serial(real) or name
+        serial = read_serial(name, real) or name
         return cls(path=real, name=name, model=model, serial=serial,
                    total_bytes=sectors * 512, physical_block_size=max(phys, 512),
                    rotational=rot)
+
+
+def read_serial(name: str, path: str) -> str:
+    """sysfs (NVMe) -> udev -> SCSI VPD page 0x80. The VPD page needs no udev, so the serial guard still
+    works in the offline maintenance boot where udev is not running."""
+    if name.startswith("loop"):         # acceptance tests (NANDWASH_TEST_LOOP): the backing file names the "drive"
+        bf = _sys(name, "loop/backing_file")
+        return "LOOP-" + os.path.basename(bf) if bf and os.environ.get("NANDWASH_TEST_LOOP") == "1" else ""
+    return _sys(name, "device/serial") or _sys(name, "serial") or _udev_serial(path) or _vpd80(name)
+
+
+def _vpd80(name: str) -> str:
+    try:
+        with open(f"/sys/block/{name}/device/vpd_pg80", "rb") as f:
+            b = f.read()
+    except OSError:
+        return ""
+    if len(b) < 4 or b[1] != 0x80:
+        return ""
+    n = int.from_bytes(b[2:4], "big")
+    return b[4:4 + n].decode("ascii", "replace").strip()
 
 
 def _udev_serial(path: str) -> str:

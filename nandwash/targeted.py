@@ -52,13 +52,17 @@ def _timed_read(dev, off, size, n=3):
 
 
 def refresh_chunks(path: str, offsets: list, chunk_size: int = 1048576, backup_dir: Optional[str] = None,
-                   log: Callable[[str], None] = print) -> dict:
+                   log: Callable[[str], None] = print, should_stop: Optional[Callable[[], bool]] = None) -> dict:
     """Read each chunk twice (must match), optionally back it up, write the same bytes back, then
     read back and compare. On a readback mismatch: restore from the in-memory copy and stop."""
     info = DeviceInfo.probe(path)
     results, stopped = [], None
     with DirectDevice(info.path, writable=True) as dev:
         for k, off in enumerate(sorted(set(offsets))):
+            if should_stop and should_stop():
+                stopped = "cancelled"
+                log("cancelled between chunks")
+                break
             if off % chunk_size or off < 0 or off + chunk_size > info.total_bytes:
                 results.append({"offset": off, "status": "skipped: out of range/unaligned"})
                 continue

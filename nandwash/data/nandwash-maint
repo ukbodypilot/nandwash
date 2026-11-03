@@ -1,0 +1,113 @@
+#!/bin/bash
+# nandwash offline maintenance. Runs as PID 1 (kernel arg init=/usr/local/sbin/nandwash-maint) with the
+# root filesystem mounted READ-ONLY and no other service running. It works from a scan made LIVE beforehand
+# (staged in /var/lib/nandwash-maint/input): re-confirms the slow chunks, rewrites them (each one is
+# timed before and after), saves a report and reboots. Whatever happens, it ends in a reboot.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+export PYTHONDONTWRITEBYTECODE=1
+umask 022                          # PID 1 starts with umask 0: results would be world-writable, and root imports them
+CONF=/etc/nandwash/maint.conf      # written by `nandwash preboot install`; every value shell-quoted
+OUT=/var/lib/nandwash-maint
+W=/run/nw
+
+mount -t proc proc /proc 2>/dev/null; mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null; mount -t tmpfs tmpfs /run 2>/dev/null
+mkdir -p $W; : > $W/log
+log() { echo "[nandwash-maint] $*" | tee -a $W/log >/dev/console 2>&1; }
+
+reboot_now() {
+  log "rebooting"
+  [ -e /proc/sys/kernel/sysrq ] && echo 1 > /proc/sys/kernel/sysrq
+  echo s > /proc/sysrq-trigger 2>/dev/null; sleep 1
+  echo b > /proc/sysrq-trigger 2>/dev/null
+  reboot -f 2>/dev/null
+  sleep 60
+}
+trap reboot_now EXIT
+
+KPID=""
+disarm() {
+  [ -n "$KPID" ] && { kill "$KPID" 2>/dev/null; wait "$KPID" 2>/dev/null; }   # kicker holds fd 9 too
+  if [ -e /proc/self/fd/9 ]; then echo V >&9 2>/dev/null; exec 9>&-; fi        # magic close = disarm
+}
+
+. $CONF 2>/dev/null || { log "no $CONF; nothing to do"; exit 0; }
+PICK_LIMIT=${PICK_LIMIT:-600}; FIX_LIMIT=${FIX_LIMIT:-600}
+MIN=$(( PICK_LIMIT + FIX_LIMIT + 60 ))
+MAXRUN=${MAXRUN:-$MIN}; [ "$MAXRUN" -lt "$MIN" ] && MAXRUN=$MIN    # never let the watchdog cut a step short
+log "start: serial=$SERIAL pick=${PICK_LIMIT}s fix=${FIX_LIMIT}s maxrun=${MAXRUN}s kernel=$(uname -r)"
+
+# 1. Root MUST be read-only (superblock options). Otherwise do not touch the disk.
+if awk '$5=="/"{split($0,a," - "); split(a[2],b," "); if (b[3] ~ /(^|,)rw(,|$)/) f=1} END{exit !f}' /proc/self/mountinfo; then
+  log "ABORT: root is mounted read-write; refusing to touch the disk"; exit 0
+fi
+log "root is read-only: ok"
+
+# 2. Hardware watchdog, kicked only until a deadline. A hang past it resets the machine.
+# Find the watchdog by NAME (numbering differs without udev). Arm it only if its timeout leaves wide margin.
+[ -n "$WDT_MODULE" ] && modprobe -q "$WDT_MODULE" 2>/dev/null; sleep 1
+WDT=""; WT=0
+for w in /sys/class/watchdog/watchdog*; do
+  [ -r "$w/identity" ] && [ "$(cat "$w/identity")" = "$WDT_IDENT" ] && { WDT=/dev/$(basename "$w"); WT=$(cat "$w/timeout" 2>/dev/null); }
+done
+if [ -n "$WDT_IDENT" ] && [ -n "$WDT" ] && [ -c "$WDT" ] && [ "${WT:-0}" -ge 20 ]; then
+  exec 9>"$WDT"
+  DEADLINE=$(( $(date +%s) + MAXRUN + 120 ))
+  ( while [ "$(date +%s)" -lt "$DEADLINE" ]; do echo . >&9 2>/dev/null; sleep 5; done ) &
+  KPID=$!
+  log "watchdog $WDT ($WDT_IDENT, ${WT}s) armed; kicked every 5s until ${MAXRUN}s+120s, then lets it reset the machine"
+else
+  log "no usable watchdog (ident='$WDT_IDENT' dev='$WDT' timeout='$WT'); continuing without"
+fi
+
+# 3. The work. Every step is time-bounded; a failed step skips the ones that depend on it, never the save/reboot.
+NW=${NW:-/opt/nandwash/venv/bin/nandwash}
+NWPY=$(dirname "$NW")/python3
+export HOME=$W                                  # anything nandwash writes goes to tmpfs; root is read-only
+export NANDWASH_STATE=$W/state NANDWASH_LOCK=$W/lock NANDWASH_NO_IMPORT=1 NANDWASH_NO_HISTORY=1  # state too; no report import here
+step() { # name timeout cmd...
+  local n=$1 t=$2; shift 2
+  log "step $n: start (limit ${t}s)"
+  timeout -k 10 "$t" "$@" > $W/$n.out 2>&1; local rc=$?
+  log "step $n: exit $rc"; tail -n 3 $W/$n.out | tee -a $W/log >/dev/console 2>&1
+  return $rc
+}
+RC=0
+# Device names are not stable across boots: find the ONE disk carrying the serial (same reader as the guard).
+DEVICE=$(timeout 60 "$NWPY" -c '
+import os, sys
+from nandwash.device import read_serial
+hits = [n for n in sorted(os.listdir("/sys/block")) if read_serial(n, "/dev/" + n) == sys.argv[1]]
+print("/dev/" + hits[0] if len(hits) == 1 else "")' "$SERIAL" 2>$W/resolve.out)
+if [ -z "$SERIAL" ] || [ -z "$DEVICE" ]; then
+  log "ABORT: no unique disk with serial '$SERIAL' (installed for ${DEVICE_HINT:-?}); nothing touched"; RC=3
+elif [ ! -r "$SCAN_REPORT" ]; then
+  log "ABORT: staged scan report '$SCAN_REPORT' missing; nothing touched"; RC=3
+else
+  log "target: $DEVICE (serial $SERIAL; installed as $DEVICE_HINT)"
+  if step pick "$PICK_LIMIT" "$NW" pick-slow "$SCAN_REPORT" $W/slow.json --device "$DEVICE" --expect-serial "$SERIAL"; then
+    N=$("$NWPY" -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["offsets"]))' $W/slow.json 2>/dev/null)
+    if [ "${N:-0}" -gt 0 ]; then
+      # refresh-chunks times every chunk before and after its rewrite: that is the evidence, no rescan needed.
+      step fix "$FIX_LIMIT" "$NW" refresh-chunks "$DEVICE" $W/slow.json \
+        --allow-readonly-mounts --yes --expect-serial "$SERIAL" --report $W/report.json || RC=$?
+    else
+      log "no persistently slow chunks confirmed; nothing to rewrite"
+    fi
+  else
+    RC=$?
+  fi
+fi
+log "pipeline done (rc $RC)"
+dmesg 2>/dev/null | tail -n 200 > $W/dmesg.txt
+
+# 4. Save results (briefly remount rw: nothing else is running, work is finished).
+if mount -o remount,rw / 2>/dev/null; then
+  D=$OUT/$(date +%Y%m%dT%H%M%S); mkdir -p "$D" && cp $W/log $W/*.out $W/report.json $W/slow.json $W/dmesg.txt "$D"/ 2>/dev/null
+  cp $CONF "$D"/maint.conf 2>/dev/null     # which drive + which scan: `nandwash results` imports this dir into history
+  sync; mount -o remount,ro / 2>/dev/null; log "results saved to $D"
+else
+  log "could not remount rw; results not saved (see console)"
+fi
+disarm
+exit 0
