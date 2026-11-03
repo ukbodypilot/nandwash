@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nandwash"
-version = "0.1.0"
+version = "0.2.0"
 description = "SSD NAND cell refresh utility for Linux"
 readme = "README.md"
 license = {text = "MIT"}

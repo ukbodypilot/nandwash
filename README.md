@@ -26,10 +26,33 @@ Requires Python 3.10+, root (`sudo`), and optionally `smartctl` (smartmontools) 
 ## Usage
 
 ```bash
-sudo nandwash info    /dev/sdX                          # device info + SMART summary
-sudo nandwash scan    /dev/sdX [--resume]               # read-only health scan
-sudo nandwash refresh /dev/sdX [--resume] [--max-temp 65]  # read + write back
+sudo nandwash list                                      # every attached drive (SATA/NVMe/USB) + what is safe on it
+sudo nandwash info    [/dev/sdX]                        # device info + SMART summary
+sudo nandwash scan    [/dev/sdX] [--resume]             # read-only health scan
+sudo nandwash refresh [/dev/sdX] [--resume] [--max-temp 65]  # read + write back (whole disk, must be unmounted)
 ```
+
+Leave `/dev/sdX` off and an interactive picker lists the attached drives (the system disk is flagged). USB
+enclosures: the serial may belong to the bridge, SMART may need `smartctl -d sat` (tried automatically), and some
+enclosures report an SSD as rotational: pass `nandwash --assume-ssd ...` once you are sure it is an SSD.
+
+### Fixing only what is slow
+
+```bash
+sudo nandwash scan /dev/sdX                                     # 1. latency map  -> ~/.nandwash/reports/*.json
+sudo nandwash refresh-free /dev/sdX --from-scan <report.json> --dry-run   # 2. what could be fixed live?
+sudo nandwash refresh-free /dev/sdX --from-scan <report.json>             # 3. fix it, live
+sudo nandwash scan /dev/sdX && nandwash compare <before.json> <after.json>  # 4. prove it
+```
+
+`refresh-free` works on a drive that is **mounted read-write** (ext4 or XFS). Per chunk it (1) asks the kernel's
+free-space map (`FS_IOC_GETFSMAP`) whether the whole 1 MiB is free, (2) freezes the filesystem and asks again,
+(3) reads it twice, writes the same bytes back, syncs and reads back, (4) thaws (about 100 ms). A hard auto-thaw timer
+guards the freeze. Chunks holding file data or metadata are reported and never touched; for those use
+`refresh-chunks` on an unmounted/read-only drive (see `maintenance/` for an offline-boot runner). Partition tables,
+bootloader gaps, swap and other filesystems are always skipped. Needs Linux >= 5.10.
+
+`tests/live_loop_test.sh` stress-tests this on a disposable loop device while a writer churns the filesystem.
 
 With `sudo`, pipx-installed tools may not be on root's `PATH`; use `sudo $(which nandwash) ...`.
 

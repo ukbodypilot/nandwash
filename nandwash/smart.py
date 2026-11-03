@@ -40,12 +40,20 @@ def smartctl_available() -> bool:
 def poll_smart(device_path: str) -> Optional[SmartSnapshot]:
     if not smartctl_available():
         return None
-    try:
-        # smartctl uses exit-status bits for warnings; ignore returncode, parse JSON
-        proc = subprocess.run(["smartctl", "-j", "-A", device_path],
-                              capture_output=True, text=True, timeout=20)
-        data = json.loads(proc.stdout)
-    except (subprocess.SubprocessError, OSError, ValueError):
+    data = None
+    # Plain first; USB-SATA bridges usually need `-d sat` to pass SMART through, so retry with it if nothing came back.
+    for extra in ([], ["-d", "sat"]):
+        try:
+            # smartctl uses exit-status bits for warnings; ignore returncode, parse JSON
+            proc = subprocess.run(["smartctl", "-j", "-A", *extra, device_path],
+                                  capture_output=True, text=True, timeout=20)
+            cand = json.loads(proc.stdout)
+        except (subprocess.SubprocessError, OSError, ValueError):
+            continue
+        data = cand
+        if (cand.get("ata_smart_attributes") or {}).get("table") or cand.get("nvme_smart_health_information_log"):
+            break
+    if data is None:
         return None
 
     snap = SmartSnapshot(attributes={})

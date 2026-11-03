@@ -27,13 +27,18 @@ def _require_root() -> None:
         raise click.ClickException("nandwash must be run as root (use sudo).")
 
 
+_ASSUME_SSD = False
+
+
 def _probe(device: str) -> DeviceInfo:
     try:
         info = DeviceInfo.probe(device)
     except DeviceError as e:
         raise click.ClickException(str(e))
-    if info.rotational:
-        raise click.ClickException(f"{device} is a rotational drive; nandwash only supports SSDs.")
+    if info.rotational and not _ASSUME_SSD:
+        hint = ("\nUSB enclosures often misreport this. If it really is an SSD, run: nandwash --assume-ssd ..."
+                if "/usb" in os.path.realpath(f"/sys/block/{info.name}") else "")
+        raise click.ClickException(f"{device} is a rotational drive; nandwash only supports SSDs.{hint}")
     return info
 
 
@@ -71,15 +76,77 @@ def _analysis(st, d, interrupted: bool) -> None:
 
 @click.group()
 @click.version_option(__version__, prog_name="nandwash")
-def main():
+@click.option("--assume-ssd", is_flag=True, help="Treat a drive that reports itself as rotational as an SSD "
+              "(some USB enclosures misreport).")
+def main(assume_ssd):
     """SSD NAND cell refresh utility for Linux."""
+    global _ASSUME_SSD
+    _ASSUME_SSD = assume_ssd
+
+
+def _drive_table(ds, numbered: bool = False):
+    from rich.table import Table
+    from .drives import human
+    t = Table(title="Drives")
+    if numbered:
+        t.add_column("#", justify="right")
+    for c in ("Device", "Drive", "Serial", "Size", "Bus", "Mounted", "Can do"):
+        t.add_column(c)
+    for i, d in enumerate(ds, 1):
+        mounted = ", ".join(f"{m}{'' if w else ' (ro)'}" for p in d.partitions for m, w in p.mounts[:1]) or "-"
+        flag = " [red]SYSTEM[/]" if d.is_system else ""
+        row = [d.path, d.title + (" [dim]removable[/]" if d.removable else "") + flag, d.serial or "?",
+               human(d.size), d.transport + (" ROT" if d.rotational else ""), mounted,
+               d.modes if d.eligible else f"[red]{d.modes}[/]"]
+        t.add_row(*([str(i)] if numbered else []), *row)
+    return t
+
+
+def _choose_device(device):
+    """Return DEVICE, or let the user pick one when it was omitted."""
+    if device:
+        return device
+    from .drives import enumerate_drives
+    ds = enumerate_drives()
+    if not ds:
+        raise click.ClickException("no drives found")
+    if not sys.stdin.isatty():
+        console.print(_drive_table(ds))
+        raise click.ClickException("no DEVICE given. Pass one of the paths above (or run interactively to pick).")
+    console.print(_drive_table(ds, numbered=True))
+    for d in ds:
+        for n in d.notes:
+            console.print(f"[dim]{d.path}: {n}[/]")
+    n = click.prompt("Which drive number", type=click.IntRange(1, len(ds)))
+    d = ds[n - 1]
+    if d.is_system:
+        click.confirm(f"{d.path} is the SYSTEM disk. Continue?", abort=True)
+    console.print(f"Using {d.path}  ({d.title}, serial {d.serial or '?'})")
+    return d.path
+
+
+@main.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def list_cmd(as_json):
+    """List attached drives (SATA, NVMe, USB) and what nandwash can safely do with each."""
+    from .drives import enumerate_drives
+    ds = enumerate_drives()
+    if as_json:
+        import json
+        click.echo(json.dumps([d.to_dict() for d in ds], indent=1))
+        return
+    console.print(_drive_table(ds))
+    for d in ds:
+        for n in d.notes:
+            console.print(f"[dim]{d.path}: {n}[/]")
 
 
 @main.command()
-@click.argument("device", type=click.Path(exists=True))
+@click.argument("device", required=False, type=click.Path(exists=True))
 def info(device):
     """Show device info and a SMART summary."""
     _require_root()
+    device = _choose_device(device)
     d = _probe(device)
     console.print(f"[bold]{d.model}[/]  serial {d.serial}")
     console.print(f"  path {d.path}   size {human_bytes(d.total_bytes)}   physical block {d.physical_block_size} B")
@@ -174,23 +241,27 @@ def _execute(device: str, mode: str, resume: bool, max_temp: int, chunk: int = 1
 
 
 @main.command()
-@click.argument("device", type=click.Path(exists=True))
+@click.argument("device", required=False, type=click.Path(exists=True))
 @click.option("--resume", is_flag=True, help="Continue from saved progress.")
 @click.option("--max-temp", default=70, show_default=True, help="Pause while drive is hotter than this (°C).")
 @click.option("--hash", "hash_data", is_flag=True, help="SHA-256 all data read (integrity check; no --resume).")
 def scan(device, resume, max_temp, hash_data):
-    """Read-only sector health scan (O_DIRECT)."""
+    """Read-only sector health scan (O_DIRECT). Omit DEVICE to pick from a list."""
+    _require_root()
+    device = _choose_device(device)
     _execute(device, "scan", resume, max_temp, hash_data=hash_data)
 
 
 @main.command()
-@click.argument("device", type=click.Path(exists=True))
+@click.argument("device", required=False, type=click.Path(exists=True))
 @click.option("--resume", is_flag=True, help="Continue from saved progress.")
 @click.option("--max-temp", default=65, show_default=True, help="Pause while drive is hotter than this (°C).")
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 @click.option("--hash", "hash_data", is_flag=True, help="SHA-256 all data read (integrity check; no --resume).")
 def refresh(device, resume, max_temp, yes, hash_data):
-    """Refresh NAND by reading every sector and writing it back. WRITES to the device."""
+    """Refresh NAND by reading every sector and writing it back. WRITES to the device. Omit DEVICE to pick."""
+    _require_root()
+    device = _choose_device(device)
     if not yes:
         click.confirm(f"This rewrites every sector of {device}. Back up critical data first. Continue?", abort=True)
     _execute(device, "refresh", resume, max_temp, hash_data=hash_data)
@@ -248,31 +319,91 @@ def refresh_chunks_cmd(device, chunks_file, allow_readonly_mounts, report, backu
 @click.option("--factor", default=1.8, show_default=True, help="Candidate = latency above this multiple of the scan median.")
 @click.option("--max-chunks", default=500, show_default=True, help="Safety cap on how many chunks to select (slowest first).")
 @click.option("--expect-serial", help="Refuse unless the device's serial number matches.")
-def pick_slow(scan_report, out_file, factor, max_chunks, expect_serial):
+def pick_slow_cmd(scan_report, out_file, factor, max_chunks, expect_serial):
     """Select chunks that are persistently slow: candidates from a scan report, re-read 3x here (read-only)."""
     import json
-    from . import targeted
-    from .device import DirectDevice
+    from .pick import pick_slow
     _require_root()
-    rep, lat = rpt.load(scan_report)
-    d = _probe(rep["device"])
-    if d.serial != rep["serial"] or (expect_serial and d.serial != expect_serial):
-        raise click.ClickException("serial mismatch; refusing.")
-    med = rpt.percentile(rpt._measured(lat), 50)
-    thr = med * factor
-    cands = sorted((i for i, x in enumerate(lat) if x > thr), key=lambda i: -lat[i])
-    cs = rep["chunk_size"]
-    confirmed = []
-    with DirectDevice(d.path, writable=False) as dev:
-        for i in cands:
-            if len(confirmed) >= max_chunks:
-                break
-            if targeted._timed_read(dev, i * cs, cs) * 1000.0 > thr:
-                confirmed.append(i * cs)
-    json.dump({"offsets": sorted(confirmed), "median_us": med, "threshold_us": thr, "candidates": len(cands)},
-              open(out_file, "w"), indent=1)
-    console.print(f"median {med / 1000:.2f} ms, threshold {thr / 1000:.2f} ms: {len(cands)} candidates, "
-                  f"{len(confirmed)} confirmed persistently slow")
+    try:
+        res, _info = pick_slow(scan_report, factor, max_chunks, expect_serial or "")
+    except (ValueError, DeviceError) as e:
+        raise click.ClickException(str(e))
+    json.dump(res, open(out_file, "w"), indent=1)
+    console.print(f"median {res['median_us'] / 1000:.2f} ms, threshold {res['threshold_us'] / 1000:.2f} ms: "
+                  f"{res['candidates']} candidates, {len(res['offsets'])} confirmed persistently slow")
+
+
+@main.command("refresh-free")
+@click.argument("device", required=False, type=click.Path(exists=True))
+@click.option("--chunks", "chunks_file", type=click.Path(exists=True),
+              help="JSON list of byte offsets (or {\"offsets\": [...]}) to consider.")
+@click.option("--from-scan", "scan_report", type=click.Path(exists=True),
+              help="Pick the persistently slow chunks from this scan report instead (re-read 3x).")
+@click.option("--factor", default=1.8, show_default=True, help="With --from-scan: slow = above this multiple of the median.")
+@click.option("--dry-run", is_flag=True, help="Only classify the chunks (free / used / outside ...); write nothing.")
+@click.option("--max-chunks", default=200, show_default=True, help="Rewrite at most this many chunks per run.")
+@click.option("--pause-ms", default=300, show_default=True, help="Pause between chunks so the system can breathe.")
+@click.option("--max-freeze-ms", default=3000, show_default=True, help="Hard auto-thaw for the filesystem freeze.")
+@click.option("--backup-dir", type=click.Path(file_okay=False), help="Save each rewritten chunk's bytes here (after the thaw).")
+@click.option("--report", type=click.Path(), help="Write a JSON result here.")
+@click.option("--expect-serial", help="Refuse unless the device's serial number matches.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+def refresh_free_cmd(device, chunks_file, scan_report, factor, dry_run, max_chunks, pause_ms, max_freeze_ms,
+                     backup_dir, report, expect_serial, yes):
+    """Rewrite chunks that are FREE SPACE on a drive that is mounted read-write (ext4/xfs), live.
+
+    Each chunk is checked against the kernel's free-space map with the filesystem frozen, rewritten with
+    its own bytes, and verified. Chunks that hold file data or metadata are reported, never touched:
+    those need `refresh-chunks` in the offline maintenance boot."""
+    import json
+    from . import livefree
+    from .pick import pick_slow
+    _require_root()
+    if bool(chunks_file) == bool(scan_report):
+        raise click.ClickException("give exactly one of --chunks or --from-scan")
+    if scan_report and not device:
+        device = json.load(open(scan_report)).get("device")
+    device = _choose_device(device)
+    d = _probe(device)
+    if expect_serial and d.serial != expect_serial:
+        raise click.ClickException(f"serial mismatch: {device} is '{d.serial}', expected '{expect_serial}'; refusing.")
+    if chunks_file:
+        data = json.load(open(chunks_file))
+        offsets = data["offsets"] if isinstance(data, dict) else data
+    else:
+        try:
+            picked, _ = pick_slow(scan_report, factor, 10_000, d.serial)
+        except (ValueError, DeviceError) as e:
+            raise click.ClickException(str(e))
+        offsets = picked["offsets"]
+        console.print(f"{len(offsets)} persistently slow chunks selected (> {picked['threshold_us'] / 1000:.2f} ms)")
+    if not dry_run and not yes:
+        click.confirm(f"Rewrite free-space chunks of {device} while it is mounted? Each chunk freezes the filesystem "
+                      f"for ~100 ms.", abort=True)
+    try:
+        res = livefree.refresh_free(d.path, offsets, backup_dir=backup_dir, dry_run=dry_run, max_chunks=max_chunks,
+                                    pause_s=pause_ms / 1000.0, max_freeze_s=max_freeze_ms / 1000.0, log=console.print)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    meaning = {"free": "free space (rewritable live)", "used": "file data / metadata (needs offline boot)",
+               "unmounted": "partition not mounted (use refresh-chunks)", "outside": "outside any partition (left alone)",
+               "unsupported": "unsupported filesystem / swap (left alone)", "out-of-range": "bad offset"}
+    for k, n in sorted(res["states"].items()):
+        console.print(f"  {n:5d}  {meaning.get(k, k)}")
+    if report:
+        with open(report, "w") as f:
+            json.dump(res, f, indent=2)
+    if dry_run:
+        console.print("[dim]dry run: nothing written[/]")
+        return
+    skipped = [r for r in res["results"] if r["status"] != "ok"]
+    console.print(f"{res.get('chunks_ok', 0)}/{len(res['results'])} chunks rewritten and verified; median read "
+                  f"{res.get('median_before_ms')} -> {res.get('median_after_ms')} ms; longest freeze {res.get('max_frozen_ms')} ms")
+    for r in skipped:
+        console.print(f"  [yellow]{r['offset']}: {r['status']}[/]")
+    if res["stopped"]:
+        console.print(f"[red]STOPPED: {res['stopped']}[/]")
+        sys.exit(2)
 
 
 @main.command()
