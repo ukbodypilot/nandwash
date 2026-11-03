@@ -1,7 +1,6 @@
 # nandwash end-state plan: from toolkit to application
 
-Status: draft 2026-11-03. Covers **A. picking drives** (decided enough to build) and **B. results** (outline;
-to be settled next). Today nandwash is a set of expert commands (`scan`, `pick-slow`, `refresh-free`,
+Status: draft 2026-11-03. Covers **A. picking drives** and **B. results**, both settled enough to build. Today nandwash is a set of expert commands (`scan`, `pick-slow`, `refresh-free`,
 `refresh-chunks`, `preboot`, `compare`) that someone has to chain correctly. The end state: the user picks
 **drives** and a **goal**; nandwash works out the steps per drive, shows the plan, runs it, and reports.
 
@@ -162,45 +161,122 @@ expert: scan, refresh, refresh-chunks, refresh-free, pick-slow, compare, info
 
 ---
 
-## B. Results (outline, to be settled next)
+## B. Results
 
-### B1. Per-drive health card
+### B0. What the data says (sda on .140, Kingston SV300 120 GB, 114,474 x 1 MiB chunks)
 
-A verdict sentence first, then the evidence:
+Two complete scans 33 min apart, nothing written to the drive in between:
 
-| verdict | rule (draft) |
+| | scan A | scan B | slow in BOTH |
+|---|---|---|---|
+| > 1.8x median | 1021 | 965 | **392** |
+| > 3x median | 10 | 9 | **0** |
+| > 5x median | 1 | 2 | **0** |
+
+- Normal chunks (A < 1.5x median) vary **±10%** between scans (B/A ratio p5 0.95, p50 1.01, p95 1.10). The drive median moved 1.4%.
+- The extreme outliers were all transient; the persistently slow chunks are the mild ones. **One scan proves nothing per
+  chunk: "slow" must mean slow on a re-read.** This validates pick-slow's re-read confirmation and argues against the
+  old `compare` rule (>3x and >1 ms), which on this drive selects only noise.
+- The first offline run rewrote 60 chunks: 41 were above 1.8x median before; all 60 were below it after, and 58 also dropped by >30%.
+  That is what "improved" looks like.
+
+### B1. One definition of slow, used everywhere
+
+- **median** = the drive's p50 chunk latency in this scan.
+- **candidate** = a chunk > **1.8x median** in the scan.
+- **slow (confirmed)** = a candidate whose re-read (median of 3 reads, taken after the scan) is still > 1.8x median.
+  This is what `pick-slow` does today. It moves into a shared `health.py` that `check`, `refresh`, `compare` and `results` all call.
+- **fixed** = a rewritten chunk whose after-read is <= 1.8x median **and** at least 30% faster than its before-read.
+- The noise band (B2) gates all of this: if the drive's own noise is wider than the threshold, the verdict is `inconclusive`, not a guess.
+
+Consequence: the `check` goal = scan + candidate re-reads. Re-reading is read-only and cheap
+(sda: ~1000 candidates x 3 reads x 2 ms = 6 s).
+
+### B2. Noise band: measured every run, automatically
+
+After the scan, re-read **200 random normal chunks** (< 1.5x median) 3 times each and record the spread of
+re-read/scan ratios (p5..p95). On sda that is about 0.95..1.10. This costs ~1-2 s, so no control-scan pair is needed.
+- If p95 > 1.5 (the drive is too noisy for a 1.8x threshold to mean anything), the verdict is `inconclusive`
+  and the card says why (thermal throttling, background GC, a busy system disk).
+- Stored with the report, so the history shows whether a drive is getting noisier.
+
+### B3. Verdicts: two separate questions
+
+**Drive state** (every run, including `check`). The first matching row wins:
+
+| state | rule |
 |---|---|
-| `healthy` | no chunk above the slow threshold, no read errors |
-| `improved` | slow chunks found and rewritten; >= 80% now read within threshold; data verified identical |
-| `unchanged` | rewritten, but latency did not move beyond the noise floor (the drive may skip identical writes) |
-| `degraded` | read errors / reallocations increased, or slow chunks that rewriting did not fix are growing scan over scan |
-| `inconclusive` | not enough data (no control scan, scan interrupted, noise floor unknown) |
+| `errors` | any unreadable sector, or SMART reallocated / pending / uncorrectable counts increased since the previous run. Card leads with **back up now**. |
+| `inconclusive` | scan incomplete, or noise band too wide (B2) |
+| `slow-regions` | confirmed slow > **0.1%** of chunks: refresh recommended (card states how many and where) |
+| `healthy` | otherwise |
 
-Evidence shown: p50/p99/max latency, the slow-chunk count before → after, a latency histogram, the SMART attributes
-that changed, write-evidence counters, data hashes match, and chunks still queued for the offline boot.
+sda: 392 of 114,474 = 0.34%, so `slow-regions`. The 0.1% line is a **starting value**: calibrate it on the mini's three
+drives (M500, M600, T-FORCE) before v0.4, and record the calibration data in this file.
 
-### B2. Noise floor
+**Refresh outcome** (only after a refresh):
 
-A verdict needs to know how noisy the drive's latency is. Options: (a) require a control scan pair once per drive;
-(b) re-read a fixed sample of chunks N times and use their spread. **Lean: (b)**, since it is cheap and automatic.
+| outcome | rule |
+|---|---|
+| `improved` | >= 80% of rewritten chunks `fixed` |
+| `partly` | 20-80% `fixed` |
+| `no-effect` | < 20% `fixed`. The card says the drive may skip identical writes, and shows the write-evidence counters. |
+| `incomplete` | chunks still queued for the offline boot, listed with the next command to run |
 
-### B3. History per serial
+Data integrity is reported separately and always: either "read-back verified identical: N/N", or a MISMATCH that stops the job.
 
-`reports/<serial>/index.json` holds one row per run (date, goal, p50, p99, slow count, errors, verdict).
-`nandwash results sdb --history` shows the trend. The optional `nandwash-check.timer` (monthly `run --goal check
---drives all`) feeds it. Decay over time is the most useful thing this tool can show the community.
+### B4. The health card (terminal: `nandwash results [DRIVE]`)
 
-### B4. Output formats
+```
+nw-3f9a2c  data-m600  Micron M600 1 TB  (sda, sata)            2026-11-03 14:02, refresh
+STATE    slow-regions   1240 confirmed slow chunks (0.13%), median 2.21 ms, noise ±8%
+OUTCOME  improved       1141/1240 fixed (92%); slow median 4.30 -> 2.25 ms; 99 queued for offline boot
+DATA     read-back verified identical: 1141/1141
+SMART    no error counters changed; host writes +1141 MiB, NAND writes +1160 MiB
+HISTORY  slow chunks 1610 -> 1240 -> 99 over 3 runs; 14 of 1141 earlier fixes slow again after 30 days
+NEXT     sudo nandwash preboot install nw-3f9a2c --dry-run
+```
+`results` with no argument prints one line per drive (id, alias, state, outcome, date of last run).
 
-- terminal card (`results`)
-- `--json` (stable schema, versioned)
-- `report --html`: one self-contained file with inline SVG charts and no external assets, for attaching to forum posts and issues
+### B5. History per drive, and the metric that matters
 
-### B5. Open questions for B
+`/var/lib/nandwash/reports/<id>/index.json` holds one row per run: date, goal, median, p99, noise band,
+candidates, confirmed slow, fixed, errors, state, outcome, and the offsets of fixed chunks.
 
-- Exact slow threshold (today: pick 1.8x median; compare >3x median and >1 ms). One definition, used everywhere.
-- Do we email/notify at all, or leave that to the timer's journal?
-- Anonymised `--html` (short ID instead of serial, see A1): default on or off?
+**The key metric is whether fixed chunks stay fixed.** On every later scan, check the previously fixed offsets
+and report how many are slow again, and after how many days. That answers the real-world question "how often
+should I refresh?". Almost nothing else tells users this, and it's the most useful data we can give back.
+
+`nandwash results DRIVE --history` shows a table plus a terminal sparkline of confirmed-slow count and median.
+The optional `nandwash-check.timer` (monthly `run --goal check --drives all`) feeds it.
+
+### B6. Output formats
+
+- **Terminal card** (B4).
+- **`--json`**: versioned schema (`"nandwash_result": 1`), the same fields as the card plus the raw numbers. Scripts and the timer use it.
+- **`nandwash report DRIVE --html -o file.html`**: one self-contained file with inline SVG (latency histogram
+  before/after, slow-chunk map across the disk, history chart), no JavaScript, no external assets.
+  - `--share`: replaces the serial with the short ID, drops hostname, mountpoints and filesystem labels,
+    and keeps model and firmware (useful to others comparing the same drive model). **Off by default**,
+    since a report on your own machine should show the serial.
+
+### B7. Notifications: none built in
+
+No email or chat integrations: each one is a dependency plus credentials to manage.
+- `nandwash run` exits with a status code: 0 healthy/improved, 1 slow-regions/partly/no-effect, 2 inconclusive, 3 errors.
+- The timer's unit therefore fails visibly in `systemctl --failed` and the journal when a drive has errors.
+- `--on-result CMD` runs a user command with the JSON on stdin, so anyone can wire up their own mail, ntfy or Home Assistant.
+
+### B8. Implementation steps (B)
+
+1. `health.py`: candidates, confirm, noise band, fixed, the state and outcome rules (pure functions over latency
+   arrays + re-read results; unit-tested on the sda numbers above as fixtures).
+2. Wire it into `check`/`refresh` jobs; the 200-chunk noise sample runs after every scan.
+3. `index.json` per drive; "slow again" tracking of earlier fixed offsets.
+4. `results` (card + one-line list + `--history`), `--json` schema + a test that pins it.
+5. `report --html` with inline SVG, plus `--share`.
+6. Exit codes, `--on-result`, `nandwash-check.timer` + service shipped in `contrib/`.
+7. Calibrate the 0.1% `slow-regions` line on the mini's three drives; record the data here.
 
 ---
 
