@@ -372,8 +372,9 @@ def _judge(d: Drive) -> None:
 def enumerate_drives(include_ineligible: bool = True) -> List[Drive]:
     mounts, swaps = _mounts_by_devnum(), _swap_devices()
     out = []
+    loops = os.environ.get("NANDWASH_TEST_LOOP") == "1"     # acceptance tests only: loop devices act as drives
     for name in sorted(os.listdir("/sys/block")):
-        if _SKIP.match(name):
+        if _SKIP.match(name) and not (loops and name.startswith("loop")):
             continue
         d = describe(name, mounts, swaps)
         if d:

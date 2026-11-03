@@ -113,17 +113,18 @@ def save(rep: dict, lat) -> Path:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", rep["serial"])
     stamp = rep["created"].replace(":", "").replace("-", "")
-    base = REPORT_DIR / f"{safe}-{rep['mode']}-{stamp}"
-    n = 1
-    while base.with_suffix(".json").exists():  # never overwrite an earlier report
+    # Names are built by appending, never with_suffix(): a serial with a "." would lose everything after it.
+    base = f"{safe}-{rep['mode']}-{stamp}"
+    name, n = base, 1
+    while (REPORT_DIR / (name + ".json")).exists():  # never overwrite an earlier report
         n += 1
-        base = REPORT_DIR / f"{safe}-{rep['mode']}-{stamp}-{n}"
-    rep["latency_file"] = base.name + ".lat"
-    with open(base.with_suffix(".json"), "w") as f:
+        name = f"{base}-{n}"
+    rep["latency_file"] = name + ".lat"
+    with open(REPORT_DIR / (name + ".json"), "w") as f:
         json.dump(rep, f, indent=2)
-    with open(base.with_suffix(".lat"), "wb") as f:
+    with open(REPORT_DIR / (name + ".lat"), "wb") as f:
         lat.tofile(f)
-    return base.with_suffix(".json")
+    return REPORT_DIR / (name + ".json")
 
 
 def load(path: str):

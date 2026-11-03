@@ -35,3 +35,15 @@ def pick_slow(scan_report: str, factor: float = 1.8, max_chunks: int = 500, expe
                 confirmed.append(i * cs)
     return {"offsets": sorted(confirmed), "median_us": med, "threshold_us": thr, "candidates": len(cands),
             "chunk_size": cs}, info
+
+
+def verdict(res: dict, lat, nchunks: int) -> dict:
+    """Drive state from a pick result (PLAN B3): slow-regions when confirmed >= max(20, 0.01% of chunks) or
+    >= 5 confirmed chunks above 3x the median (severity from the scan's latency at those chunks)."""
+    cs, med = res["chunk_size"], res["median_us"] or 1
+    conf = res["offsets"]
+    severe = sum(1 for off in conf if off // cs < len(lat) and lat[off // cs] > 3 * med)
+    line = max(20, nchunks // 10000)
+    state = "slow-regions" if len(conf) >= line or severe >= 5 else "healthy"
+    return {"state": state, "confirmed": len(conf), "severe": severe, "chunks": nchunks, "line": line,
+            "share_pct": round(100.0 * len(conf) / nchunks, 4) if nchunks else 0.0}

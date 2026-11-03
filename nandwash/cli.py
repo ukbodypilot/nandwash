@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import sys
 import time
-from datetime import datetime
 
 import click
 from rich.console import Console
@@ -12,10 +11,9 @@ from rich.live import Live
 
 from array import array
 
-from . import __version__, progress as prog, report as rpt
+from . import __version__, report as rpt
 from .device import DeviceError, DeviceInfo
-from .engine import run as engine_run
-from .smart import SmartSnapshot, poll_smart, smartctl_available
+from .smart import poll_smart, smartctl_available
 from .ui import Dashboard, final_report, human_bytes
 
 console = Console()
@@ -55,7 +53,7 @@ def _mounted(info: DeviceInfo) -> list:
     return out
 
 
-def _analysis(st, d, interrupted: bool) -> None:
+def _analysis(st, d, interrupted: bool, path=None) -> None:
     stats = rpt.latency_stats(st.latency_us)
     if stats.get("chunks"):
         console.print(f"Read latency per {st.chunk_size // 1024} KiB chunk (ms): "
@@ -67,8 +65,8 @@ def _analysis(st, d, interrupted: bool) -> None:
             console.print("  " + line)
     if st.sha256:
         console.print(f"SHA-256 of data read: {st.sha256}")
-    rep = rpt.build(st, d, interrupted)
-    path = rpt.save(rep, st.latency_us if st.latency_us is not None else array("f"))
+    if path is None:
+        path = rpt.save(rpt.build(st, d, interrupted), st.latency_us if st.latency_us is not None else array("f"))
     console.print(f"Report saved: {path}")
     if st.mode == "refresh" and not interrupted:
         console.print("To judge the effect, run a scan now and compare:  nandwash compare <before.json> <after.json>")
@@ -275,6 +273,241 @@ def plan_cmd(drives_sel, goal, output):
         console.print(f"saved {output}")
 
 
+# ---------- jobs (A5): run / status / resume / cancel ----------
+def _job_table(job):
+    from rich.table import Table
+    from rich import box
+    from . import plan as pl
+    from .drives import human
+    t = Table(title=f"job {job['id']}: {job['goal']} ({_jobs().effective_state(job)})", box=box.SIMPLE_HEAD,
+              pad_edge=False)
+    for c in ("Dev", "ID", "Drive", "Step", "State", "%", "MB/s", "ETA", "°C", "Slow"):
+        t.add_column(c, no_wrap=c not in ("Drive", "State"), overflow="fold")
+    for d in job["drives"]:
+        pr, res = d.get("progress") or {}, d.get("results") or {}
+        step = d["steps"][d["step"]] if d["step"] < len(d["steps"]) else "-"
+        state = d["status"] + (f": {d['error']}" if d.get("error") else "")
+        colour = {"done": "green", "failed": "red", "skipped": "yellow", "cancelled": "yellow"}.get(d["status"])
+        slow = res.get("pick", {})
+        t.add_row(d.get("name") or "?", d["id"], f"{d['model']} {human(d['size'])}", f"{d['step'] + 1 if step != '-' else len(d['steps'])}/{len(d['steps'])} {step}",
+                  f"[{colour}]{state}[/]" if colour else state,
+                  f"{pr['pct']:.1f}" if pr.get("pct") is not None else "",
+                  f"{pr['mbps']:.0f}" if pr.get("mbps") else "", pl.human_s(pr["eta_s"]) if pr.get("eta_s") else "",
+                  str(pr["temp"]) if pr.get("temp") is not None else "",
+                  f"{slow['confirmed']} {slow['state']}" if slow else "")
+    return t
+
+
+def _jobs():
+    from . import jobs
+    return jobs
+
+
+def _job_summary(job) -> None:
+    console.print(_job_table(job))
+    if job.get("message"):
+        console.print(f"[dim]{job['message']}[/]", highlight=False)
+    for d in job["drives"]:
+        r = d.get("results") or {}
+        for k in ("live_free", "rewrite_chunks"):
+            if k in r and r[k].get("chunks_ok"):
+                console.print(f"  {d['name']}: {k.replace('_', ' ')}: {r[k]['chunks_ok']} chunks, median read "
+                              f"{r[k].get('median_before_ms')} -> {r[k].get('median_after_ms')} ms", highlight=False)
+        q = r.get("queue_offline")
+        if q and q.get("chunks"):
+            console.print(f"  [bold]{d['name']}: {q['chunks']} slow chunks hold data and wait for the offline boot.[/]"
+                          f"\n    next: {q['next']}", highlight=False)
+    if _jobs().resumable(job):
+        console.print(f"Resume with: sudo nandwash resume {job['id']}")
+
+
+def _confirm_writes(pairs, yes: bool) -> None:
+    """Write plans need a yes; a SYSTEM disk needs its serial's last 4 characters typed, even with --yes."""
+    for dp, d in pairs:
+        if any(s in ("live-free", "rewrite-chunks", "full-refresh") for s in dp.steps) and d.is_system:
+            got = click.prompt(f"{d.name} ({d.model}, serial {d.serial}) is the SYSTEM disk. Type the last 4 "
+                               "characters of its serial to allow writes to it")
+            if got.strip() != d.serial[-4:]:
+                raise click.ClickException("serial did not match; nothing done")
+    if not yes:
+        click.confirm("This plan WRITES to the drives above. Start?", abort=True)
+
+
+def _run_job(job, background: bool, max_temp: int) -> None:
+    jobs = _jobs()
+    if background:
+        import shutil
+        import subprocess
+        exe = [sys.executable, "-m", "nandwash", "_job-run", job["id"], "--max-temp", str(max_temp)]
+        env = {k: os.environ[k] for k in ("NANDWASH_STATE", "NANDWASH_LOCK", "NANDWASH_TEST_LOOP", "PYTHONPATH", "HOME")
+               if k in os.environ}
+        if shutil.which("systemd-run"):
+            cmd = ["systemd-run", f"--unit=nandwash-job-{job['id']}", "--collect", "--quiet",
+                   "-p", f"StandardOutput=truncate:{jobs.job_dir(job['id'])}/runner.log", "-p", "StandardError=inherit"]
+            cmd += [f"--setenv={k}={v}" for k, v in env.items()] + exe
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode:
+                raise click.ClickException(f"systemd-run failed: {r.stderr.strip()}")
+            console.print(f"job {job['id']} running as unit nandwash-job-{job['id']}")
+        else:
+            with open(os.path.join(jobs.job_dir(job["id"]), "runner.log"), "w") as log:
+                subprocess.Popen(exe, stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+            console.print(f"job {job['id']} running in the background (detached)")
+        console.print("Watch: nandwash status   Stop: sudo nandwash cancel")
+        return
+    with Live(_job_table(job), console=console, refresh_per_second=2, screen=False) as live:
+        r = jobs.Runner(job, on_update=lambda j: live.update(_job_table(j)), max_temp=max_temp)
+        try:
+            r.run()
+        except jobs.JobError as e:
+            raise click.ClickException(str(e))
+    _job_summary(job)
+    if job["state"] == "paused":
+        sys.exit(130)
+    if job["state"] == "failed" or any(d["status"] == "failed" for d in job["drives"]):
+        sys.exit(1)
+
+
+@main.command("run")
+@click.argument("plan_file", required=False, type=click.Path(exists=True, dir_okay=False))
+@click.option("--drives", "drives_sel", help="Selector (see `nandwash plan --help`); instead of PLAN_FILE.")
+@_goal_opt
+@click.option("--background", is_flag=True, help="Run under systemd-run; watch with `nandwash status`.")
+@click.option("--yes", is_flag=True, help="Do not ask before writing (the SYSTEM disk still asks).")
+@click.option("--max-temp", default=70, show_default=True, help="Pause while a drive is hotter than this (°C).")
+def run_cmd(plan_file, drives_sel, goal, background, yes, max_temp):
+    """Run a plan: a saved PLAN_FILE, or --drives/--goal made now. One drive at a time."""
+    from . import plan as pl
+    from .drives import enumerate_drives
+    jobs = _jobs()
+    _require_root()
+    if plan_file and drives_sel:
+        raise click.UsageError("give PLAN_FILE or --drives, not both")
+    if plan_file:
+        try:
+            p = pl.load(plan_file)
+        except (OSError, ValueError) as e:
+            raise click.ClickException(str(e))
+    else:
+        p = _make_plan(drives_sel or "all", goal)
+    pairs, problems = pl.validate(p, enumerate_drives())
+    for x in problems:
+        console.print(f"[yellow]cannot run[/] {x}", highlight=False)
+    if plan_file and problems:
+        raise click.ClickException("the plan no longer matches the attached drives; make a new one "
+                                   "(`nandwash plan ... -o FILE`)")
+    p.drives = [dp for dp, _ in pairs]
+    _show_plan(p)
+    if not p.drives:
+        return
+    busy = jobs.latest(lambda j: jobs.effective_state(j) == "running")
+    if busy:
+        raise click.ClickException(f"job {busy['id']} is running; see `nandwash status`")
+    if p.writes:
+        _confirm_writes(pairs, yes)
+    job = jobs.create(p)
+    _run_job(job, background, max_temp)
+
+
+@main.command("_job-run", hidden=True)
+@click.argument("job_id")
+@click.option("--max-temp", default=70)
+def job_run_cmd(job_id, max_temp):
+    import signal
+    jobs = _jobs()
+
+    def _term(*_):                      # `systemctl stop` / `kill`: pause cleanly at the next chunk, like Ctrl+C
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _term)
+    signal.signal(signal.SIGHUP, _term)
+    job = jobs.load(job_id)
+    st = jobs.Runner(job, log=lambda s: print(s, flush=True), max_temp=max_temp).run()
+    sys.exit(0 if st == "done" else 1)
+
+
+def _pick_job(job_id):
+    jobs = _jobs()
+    try:
+        if job_id:
+            return jobs.load(job_id)
+    except jobs.JobError as e:
+        raise click.ClickException(str(e))
+    j = jobs.latest(lambda j: jobs.effective_state(j) == "running") or jobs.latest()
+    if not j:
+        raise click.ClickException("no jobs yet (start one with `nandwash run`)")
+    return j
+
+
+@main.command("status")
+@click.argument("job_id", required=False)
+@click.option("--json", "as_json", is_flag=True, help="One snapshot of job.json for scripts.")
+@click.option("--once", is_flag=True, help="Print once instead of following a running job.")
+def status_cmd(job_id, as_json, once):
+    """Show the running (or latest) job; follows it live until it ends or Ctrl+C."""
+    import json
+    jobs = _jobs()
+    job = _pick_job(job_id)
+    if as_json:
+        job["effective_state"] = jobs.effective_state(job)
+        click.echo(json.dumps(job, indent=1))
+        return
+    if once or jobs.effective_state(job) != "running":
+        _job_summary(job)
+        return
+    try:
+        with Live(_job_table(job), console=console, refresh_per_second=1, screen=False) as live:
+            while jobs.effective_state(job) == "running":
+                time.sleep(1)
+                job = jobs.load(job["id"])
+                live.update(_job_table(job))
+    except KeyboardInterrupt:
+        console.print("[dim]detached; the job keeps running[/]")
+        return
+    _job_summary(job)
+
+
+@main.command("resume")
+@click.argument("job_id", required=False)
+@click.option("--background", is_flag=True)
+@click.option("--max-temp", default=70, show_default=True)
+def resume_cmd(job_id, background, max_temp):
+    """Continue a paused or interrupted job where it stopped."""
+    jobs = _jobs()
+    _require_root()
+    job = jobs.load(job_id) if job_id else jobs.latest(jobs.resumable)
+    if not job:
+        raise click.ClickException("no resumable job")
+    if not jobs.resumable(job):
+        raise click.ClickException(f"job {job['id']} is {jobs.effective_state(job)}; nothing to resume")
+    try:
+        os.unlink(os.path.join(jobs.job_dir(job["id"]), "cancel"))
+    except OSError:
+        pass
+    _run_job(job, background, max_temp)
+
+
+@main.command("cancel")
+@click.argument("job_id", required=False)
+def cancel_cmd(job_id):
+    """Stop the running job at the next chunk boundary (a paused job is marked cancelled)."""
+    jobs = _jobs()
+    _require_root()
+    job = _pick_job(job_id)
+    st = jobs.effective_state(job)
+    if st == "running":
+        jobs.request_cancel(job["id"])
+        console.print(f"cancel requested; job {job['id']} stops at the next chunk boundary")
+    elif jobs.resumable(job):
+        job["state"] = "cancelled"
+        for d in job["drives"]:
+            if d["status"] not in jobs.FINAL:
+                d["status"] = "cancelled"
+        jobs.save(job)
+        console.print(f"job {job['id']} cancelled")
+    else:
+        console.print(f"job {job['id']} is already {st}")
+
+
 @main.command()
 @click.argument("device", required=False, type=click.Path(exists=True))
 def info(device):
@@ -301,77 +534,26 @@ def info(device):
 
 def _execute(device: str, mode: str, resume: bool, max_temp: int, chunk: int = 1048576,
              hash_data: bool = False) -> None:
+    from .passes import PassError, run_pass
     _require_root()
-    if hash_data and resume:
-        raise click.ClickException("--hash needs an uninterrupted whole-device pass; it cannot be used with --resume")
     d = _probe(device)
-    state_in = None
-    if resume:
-        state_in = prog.load(d.serial)
-        if not state_in:
-            raise click.ClickException(f"no saved progress for serial {d.serial}")
-        if state_in.get("serial") != d.serial:
-            raise click.ClickException("saved progress belongs to a different drive (serial mismatch)")
-        if state_in.get("mode") != mode:
-            raise click.ClickException(f"saved progress is for '{state_in.get('mode')}' mode, not '{mode}'")
-        if state_in.get("total_bytes") != d.total_bytes:
-            raise click.ClickException("drive size differs from saved progress")
-        chunk = state_in.get("chunk_size", chunk)
-
-    if mode == "refresh":
-        mounted = _mounted(d)
-        if mounted:
-            raise click.ClickException("refusing to refresh a device with mounted filesystems:\n  " + "\n  ".join(mounted))
-
-    started_iso = (state_in or {}).get("start_time") or datetime.now().isoformat(timespec="seconds")
     dash = Dashboard(d)
-    st = None
-    interrupted = False
-    last_save = time.time()
-
-    def checkpoint(s, done=False):
-        if s.latency_us is not None:
-            prog.save_latency(d.serial, s.latency_us)
-        prog.save(d.serial, {
-            "device_path": d.path, "serial": d.serial, "mode": mode, "total_bytes": d.total_bytes,
-            "current_offset": s.current_offset, "error_sectors": s.error_sectors, "chunk_size": chunk,
-            "start_time": started_iso, "good_bytes": s.good_bytes, "written_bytes": s.written_bytes,
-            "retry_count": s.retry_count,
-            "smart_before": s.smart_before.to_dict() if s.smart_before else None,
-        })
-
-    lat = None
-    if state_in:
-        nchunks = -(-d.total_bytes // chunk)
-        lat = prog.load_latency(d.serial, nchunks)
-    gen = engine_run(d.path, mode, start_offset=(state_in or {}).get("current_offset", 0),
-                     chunk_size=chunk, max_temp=max_temp, resume=state_in, info=d, latency=lat, hash_data=hash_data)
     try:
         with Live(console=console, refresh_per_second=2, screen=False) as live:
-            for st in gen:
-                live.update(dash.render(st))
-                if time.time() - last_save >= SAVE_INTERVAL:
-                    checkpoint(st)
-                    last_save = time.time()
-    except KeyboardInterrupt:
-        interrupted = True
-    except OSError as e:
-        console.print(f"[red]I/O failure: {e}[/]")
-        interrupted = True
-
+            res = run_pass(d, mode, resume=resume, max_temp=max_temp, chunk=chunk, hash_data=hash_data,
+                           on_state=lambda s: live.update(dash.render(s)), save_interval=SAVE_INTERVAL)
+    except PassError as e:
+        raise click.ClickException(str(e))
+    if res.error:
+        console.print(f"[red]{res.error}[/]")
+    st = res.state
     if st is None:
         return
-    if st.finished and not interrupted:
-        prog.delete(d.serial)
-        prog.delete_latency(d.serial)
-        final_report(console, st)
-        _analysis(st, d, interrupted=False)
-    else:
-        checkpoint(st)
-        final_report(console, st, interrupted=True)
-        _analysis(st, d, interrupted=True)
+    final_report(console, st, interrupted=not res.finished)
+    _analysis(st, d, interrupted=not res.finished, path=res.report)
+    if not res.finished:
         console.print(f"Progress saved. Resume with: sudo nandwash {mode} {device} --resume")
-        sys.exit(130 if interrupted else 1)
+        sys.exit(130 if res.interrupted else 1)
 
 
 @main.command()
@@ -583,9 +765,6 @@ def compare(before, after):
     console.print("[dim]Latency varies run to run: judge changes against a control (two scans with no refresh between them).[/]")
 
 
-if __name__ == "__main__":
-    main()
-
 
 @main.group()
 def preboot():
@@ -670,3 +849,7 @@ def preboot_uninstall(grub_dir):
     _require_root()
     pb.uninstall(grub_dir, log=lambda m: console.print(f"  {m}", highlight=False))
     console.print("[green]Uninstalled.[/]")
+
+
+if __name__ == "__main__":
+    main()

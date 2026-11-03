@@ -61,6 +61,9 @@ class DeviceInfo:
 def read_serial(name: str, path: str) -> str:
     """sysfs (NVMe) -> udev -> SCSI VPD page 0x80. The VPD page needs no udev, so the serial guard still
     works in the offline maintenance boot where udev is not running."""
+    if name.startswith("loop"):         # acceptance tests (NANDWASH_TEST_LOOP): the backing file names the "drive"
+        bf = _sys(name, "loop/backing_file")
+        return "LOOP-" + os.path.basename(bf) if bf and os.environ.get("NANDWASH_TEST_LOOP") == "1" else ""
     return _sys(name, "device/serial") or _sys(name, "serial") or _udev_serial(path) or _vpd80(name)
 
 

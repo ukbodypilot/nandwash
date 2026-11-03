@@ -77,7 +77,7 @@ def classify(drive: drv.Drive, offsets: list, chunk_size: int) -> list:
 
 def refresh_free(path: str, offsets: list, chunk_size: int = 1048576, backup_dir: Optional[str] = None,
                  dry_run: bool = False, max_chunks: int = 200, pause_s: float = 0.3, max_freeze_s: float = 3.0,
-                 log: Callable[[str], None] = print) -> dict:
+                 log: Callable[[str], None] = print, should_stop: Optional[Callable[[], bool]] = None) -> dict:
     info = DeviceInfo.probe(path)
     drive = drv.describe(info.name)
     if drive is None:
@@ -97,6 +97,10 @@ def refresh_free(path: str, offsets: list, chunk_size: int = 1048576, backup_dir
     parts = {p.name: p for p in drive.partitions}
     with DirectDevice(info.path, writable=True) as dev:
         for k, row in enumerate(todo):
+            if should_stop and should_stop():
+                res["stopped"] = "cancelled"
+                log("cancelled between chunks")
+                break
             off, part = row["offset"], parts[row["partition"]]
             mp = row["mountpoint"]
             maj, mino = (int(x) for x in part.devnum.split(":"))
