@@ -95,12 +95,20 @@ MIT
 
 Chunks that hold file data or metadata can only be rewritten with the filesystem not in use. The offline runner
 (`nandwash/data/nandwash-maint`) boots the machine once into a minimal PID 1 with the root filesystem read-only,
-scans, rewrites only the persistently slow chunks, rescans, saves a report and reboots.
+re-confirms which chunks are persistently slow, rewrites them (timing each one before and after), saves a report
+and reboots. The full scan is done **live** beforehand (it is read-only); scanning offline would keep the machine
+down far longer. The offline time limits are sized from that scan, and the hardware watchdog deadline is derived from them.
 
 ```
+sudo nandwash scan DEVICE                        # live, read-only: the latency map the offline boot works from
 sudo nandwash preboot check  [DEVICE]            # can this machine do it? verdict + a reason per finding
 sudo nandwash preboot install DEVICE --dry-run   # exactly which files / GRUB entry an install would write
 ```
+
+The newest completed scan of the drive's serial is used, or pass `--from-scan REPORT`. It must be complete and
+must match the drive's serial and size. It is copied to `/var/lib/nandwash-maint/input/`. Offline, the drive
+is found by serial (device names can change between boots) using SCSI VPD page 0x80, which needs no udev.
+The maintenance kernel gets `ro panic=30`, so a crash reboots back to the normal system.
 
 Both are read-only. The real install is deliberately not enabled yet. Supported: GRUB with an ext2/3/4 or XFS root
 that is a plain partition, nandwash installed on the root filesystem, target drive on the internal bus. Anything

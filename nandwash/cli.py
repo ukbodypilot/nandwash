@@ -319,13 +319,14 @@ def refresh_chunks_cmd(device, chunks_file, allow_readonly_mounts, report, backu
 @click.option("--factor", default=1.8, show_default=True, help="Candidate = latency above this multiple of the scan median.")
 @click.option("--max-chunks", default=500, show_default=True, help="Safety cap on how many chunks to select (slowest first).")
 @click.option("--expect-serial", help="Refuse unless the device's serial number matches.")
-def pick_slow_cmd(scan_report, out_file, factor, max_chunks, expect_serial):
+@click.option("--device", default="", help="Device to re-read (default: the path recorded in the report). Serial must match.")
+def pick_slow_cmd(scan_report, out_file, factor, max_chunks, expect_serial, device):
     """Select chunks that are persistently slow: candidates from a scan report, re-read 3x here (read-only)."""
     import json
     from .pick import pick_slow
     _require_root()
     try:
-        res, _info = pick_slow(scan_report, factor, max_chunks, expect_serial or "")
+        res, _info = pick_slow(scan_report, factor, max_chunks, expect_serial or "", device=device)
     except (ValueError, DeviceError) as e:
         raise click.ClickException(str(e))
     json.dump(res, open(out_file, "w"), indent=1)
@@ -462,11 +463,13 @@ _ICON = {"ok": "[green]ok[/]", "warn": "[yellow]WARN[/]", "fail": "[red]FAIL[/]"
 
 @preboot.command("check")
 @click.argument("device", required=False, type=click.Path(exists=True))
+@click.option("--from-scan", "scan_report", type=click.Path(exists=True, dir_okay=False),
+              help="Live scan report to work from (default: the newest completed scan of DEVICE's serial).")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def preboot_check(device, as_json):
+def preboot_check(device, scan_report, as_json):
     """Can this machine run the maintenance boot? Read-only; prints a verdict and a reason per finding."""
     from . import preboot as pb
-    rep = pb.check(device)
+    rep = pb.check(device, scan_report=scan_report)
     if as_json:
         import json
         click.echo(json.dumps(rep.to_dict(), indent=1))
@@ -480,14 +483,16 @@ def preboot_check(device, as_json):
 
 @preboot.command("install")
 @click.argument("device", required=False, type=click.Path(exists=True))
+@click.option("--from-scan", "scan_report", type=click.Path(exists=True, dir_okay=False),
+              help="Live scan report to work from (default: the newest completed scan of DEVICE's serial).")
 @click.option("--dry-run", is_flag=True, help="Show exactly what would be written. Required: the real install is not enabled yet.")
-def preboot_install(device, dry_run):
+def preboot_install(device, scan_report, dry_run):
     """Preview installing the maintenance boot for DEVICE. Writes nothing."""
     from . import preboot as pb
     if not dry_run:
         raise click.ClickException("the real install is not enabled yet; run with --dry-run to see what it would do.")
     device = _choose_device(device)
-    rep = pb.check(device)
+    rep = pb.check(device, scan_report=scan_report)
     try:
         pl = pb.plan(rep)
     except ValueError as e:

@@ -16,11 +16,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
 MAINT_PATH = "/usr/local/sbin/nandwash-maint"
 CONF_PATH = "/etc/nandwash/maint.conf"
+INPUT_DIR = "/var/lib/nandwash-maint/input"     # the live scan report, staged on the root fs for the offline boot
 ENTRY_ID = "nandwash-maint"
 MARK_BEGIN, MARK_END = "# >>> nandwash-maint (managed) >>>", "# <<< nandwash-maint (managed) <<<"
 ROOT_FS_OK = ("ext4", "ext3", "ext2", "xfs")
@@ -93,9 +95,11 @@ def parse_cmdline(text: str) -> list:
 
 def maint_cmdline(args: list) -> list:
     """The running kernel's arguments, turned into the maintenance entry's: root read-only, our init, no splash."""
-    drop = ("BOOT_IMAGE=", "init=", "resume=", "resume_offset=")   # resume= could restore a hibernation image instead of running us
+    # resume= could restore a hibernation image instead of running us; panic= is replaced so a kernel panic
+    # (or our PID 1 dying) reboots back to the normal system instead of sitting on a dead console.
+    drop = ("BOOT_IMAGE=", "init=", "resume=", "resume_offset=", "panic=")
     out = [a for a in args if not a.startswith(drop) and a not in ("rw", "ro", "quiet", "splash")]
-    return out + ["ro", f"init={MAINT_PATH}"]
+    return out + ["ro", "panic=30", f"init={MAINT_PATH}"]
 
 
 def find_initrds(kernel_real: str) -> list:
@@ -111,7 +115,8 @@ def find_initrds(kernel_real: str) -> list:
 
 
 def render_entry(fs_uuid: str, fstype: str, kernel_grub: str, initrd_grub: list, args: list) -> str:
-    lines = [f"menuentry 'nandwash offline maintenance (one-shot)' --id {ENTRY_ID} {{"]
+    lines = [f"menuentry 'nandwash offline maintenance (one-shot)' --id {ENTRY_ID} {{",
+             "    insmod part_gpt", "    insmod part_msdos"]
     if fstype in _INSMOD:
         lines.append(f"    insmod {_INSMOD[fstype]}")
     lines += [f"    search --no-floppy --fs-uuid --set=root {fs_uuid}",
@@ -126,9 +131,112 @@ def managed_block(entry: str) -> str:
     return f"{MARK_BEGIN}\n{entry}{MARK_END}\n"
 
 
-def render_conf(device: str, serial: str, nw: str, wdt_module: str, wdt_ident: str) -> str:
-    return (f"DEVICE={device}\nSERIAL={serial}\nNW={nw}\nMAXRUN=3000\nSCAN_LIMIT=900\nFIX_LIMIT=900\n"
-            f"WDT_MODULE={wdt_module}\nWDT_IDENT={wdt_ident}\n")
+CONF_KEYS = ("SERIAL", "DEVICE_HINT", "NW", "SCAN_REPORT", "PICK_LIMIT", "FIX_LIMIT", "MAXRUN", "WDT_MODULE", "WDT_IDENT")
+
+
+def render_conf(values: dict) -> str:
+    """maint.conf is SOURCED by bash as PID 1: every value is shell-quoted, unknown keys are refused."""
+    bad = set(values) - set(CONF_KEYS)
+    if bad:
+        raise ValueError(f"unknown maint.conf keys: {sorted(bad)}")
+    return "".join(f"{k}={shlex.quote(str(values.get(k, '')))}\n" for k in CONF_KEYS)
+
+
+# ---------- the live scan the offline boot works from ----------
+MAX_PICK_CHUNKS = 500          # pick-slow's default cap on confirmed chunks
+PICK_FACTOR = 1.8              # pick-slow's default "slow" threshold, x median
+
+
+def time_budget(rep: dict, lat, factor: float = PICK_FACTOR, max_chunks: int = MAX_PICK_CHUNKS) -> dict:
+    """Time limits for the offline steps, from the scan's own latency map (microseconds per chunk).
+    pick-slow re-reads EVERY candidate 3x (worst case: none confirm); refresh-chunks does ~9 reads + a synced
+    write per chunk it rewrites. Both get 2x slack plus a fixed allowance for interpreter start-up."""
+    v = sorted(x for x in lat if x > 0)
+    med = v[(len(v) - 1) // 2] if v else 0.0
+    thr = med * factor
+    cands = sorted((x for x in lat if x > thr), reverse=True)
+    pick_s = 2 * sum(3 * x for x in cands) / 1e6
+    top = cands[:max_chunks]
+    fix_s = 2 * (sum(9 * x for x in top) / 1e6 + 0.5 * len(top))
+    pick_limit, fix_limit = int(max(300, pick_s + 120)), int(max(300, fix_s + 120))
+    return {"median_us": med, "candidates": len(cands), "pick_limit": pick_limit, "fix_limit": fix_limit,
+            "maxrun": pick_limit + fix_limit + 60}       # +60: two kill grace periods, device resolve, logging
+
+
+def scan_report_dirs() -> list:
+    out = [os.path.expanduser("~/.nandwash/reports"), "/root/.nandwash/reports"]
+    su = os.environ.get("SUDO_USER")
+    if su:
+        try:
+            import pwd
+            out.append(os.path.join(pwd.getpwnam(su).pw_dir, ".nandwash/reports"))
+        except KeyError:
+            pass
+    return list(dict.fromkeys(out))
+
+
+def find_scan_report(serial: str) -> str:
+    """Newest `<serial>-scan-*.json` in the usual report directories ('' if none)."""
+    import re as _re
+    safe = _re.sub(r"[^A-Za-z0-9._-]", "_", serial)
+    found = []
+    for d in scan_report_dirs():
+        found += glob.glob(os.path.join(d, f"{safe}-scan-*.json"))
+    def complete(p):
+        try:
+            import json
+            with open(p) as fh:
+                return bool(json.load(fh).get("complete"))
+        except (OSError, ValueError):
+            return False
+    found.sort(key=os.path.getmtime, reverse=True)
+    return next((p for p in found if complete(p)), found[0] if found else "")   # newest COMPLETE; else say why not
+
+
+def validate_scan(path: str, serial: str, size: int, now: Optional[float] = None):
+    """(rep, lat, problems, warnings). problems: the report must not be used."""
+    from . import report as rpt
+    try:
+        rep, lat = rpt.load(path)
+    except (OSError, ValueError, KeyError, EOFError) as e:
+        return None, None, [f"cannot read {path}: {e}"], []
+    probs, warns = [], []
+    if rep.get("mode") != "scan":
+        probs.append(f"is a '{rep.get('mode')}' report, not a scan")
+    if not rep.get("complete"):
+        probs.append("the scan did not complete")
+    if rep.get("serial") != serial:
+        probs.append(f"is for serial '{rep.get('serial')}', not '{serial}'")
+    if rep.get("total_bytes") != size:
+        probs.append(f"covers {rep.get('total_bytes')} bytes, the drive has {size}")
+    if not any(x > 0 for x in lat):
+        probs.append("has no latency measurements")
+    try:
+        from datetime import datetime
+        age = ((now or time.time()) - datetime.fromisoformat(rep["created"]).timestamp()) / 86400
+        if age > 14:
+            warns.append(f"is {age:.0f} days old; re-scan for a current picture")
+    except (KeyError, ValueError, TypeError):
+        warns.append("has no readable creation time")
+    return rep, lat, probs, warns
+
+
+def _remote_session() -> bool:
+    """SSH_CONNECTION is stripped by sudo, so also walk the process ancestry looking for sshd."""
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return True
+    pid = os.getpid()
+    for _ in range(64):
+        stat = _read(f"/proc/{pid}/stat")
+        if not stat:
+            return False
+        comm = stat[stat.index("(") + 1:stat.rindex(")")]
+        if comm in ("sshd", "sshd-session") or comm.startswith("sshd:"):
+            return True
+        pid = int(stat[stat.rindex(")") + 2:].split()[1])
+        if pid <= 1:
+            return False
+    return False
 
 
 # ---------- machine inspection ----------
@@ -199,7 +307,7 @@ def _watchdogs() -> list:
     return out
 
 
-def check(device: Optional[str] = None, mounts: Optional[list] = None) -> Report:
+def check(device: Optional[str] = None, mounts: Optional[list] = None, scan_report: Optional[str] = None) -> Report:
     from . import drives as drv
     r = Report()
     f = r.facts
@@ -213,7 +321,7 @@ def check(device: Optional[str] = None, mounts: Optional[list] = None) -> Report
     r.add("platform", "info", f"Linux, {osr.get('PRETTY_NAME') or osr.get('ID') or 'unknown distro'}, kernel {os.uname().release}")
     if os.geteuid() != 0:
         r.add("privileges", "warn", "not root: /boot/grub and the kernel log may be unreadable, so some checks are weaker. Re-run with sudo")
-    if os.environ.get("SSH_CONNECTION"):
+    if _remote_session():
         r.add("session", "warn", "this is a REMOTE session. The maintenance boot takes the machine off the network "
                                  "for up to an hour; make sure you can reach the console or power-cycle it")
     r.add("firmware", "info", "UEFI" if os.path.isdir("/sys/firmware/efi") else "legacy BIOS")
@@ -309,8 +417,17 @@ def check(device: Optional[str] = None, mounts: Optional[list] = None) -> Report
             r.add("kernel image", "ok", f"{kreal} + {', '.join(os.path.basename(i) for i in inits)} (fs {km[1]}, uuid {kuuid})")
 
     # --- what the maintenance script needs on the ROOT filesystem
-    missing = [t for t in ("bash", "timeout", "awk", "modprobe", "mount", "sync", "dmesg", "reboot") if not shutil.which(t)]
-    r.add("tools", "fail" if missing else "ok", f"missing: {', '.join(missing)}" if missing else "bash, timeout, awk, modprobe, mount, sync, dmesg, reboot present")
+    need = ("bash", "timeout", "awk", "modprobe", "mount", "sync", "dmesg", "reboot", "cp", "tail", "date", "sleep")
+    missing = [t for t in need if not shutil.which(t)]
+    r.add("tools", "fail" if missing else "ok", f"missing: {', '.join(missing)}" if missing else ", ".join(need) + " present")
+    off_root = []
+    for p in (os.path.dirname(MAINT_PATH), os.path.dirname(CONF_PATH), INPUT_DIR, "/var/lib"):
+        m = mount_for(p, mounts)
+        if m and m[0] != "/":
+            off_root.append(f"{p} is on {m[0]}")
+    if off_root:
+        r.add("install paths", "fail", "the runner, its config and the staged scan must be on the ROOT filesystem "
+                                       "(nothing else is mounted offline): " + "; ".join(off_root))
     if not shutil.which("smartctl"):
         r.add("smartctl", "warn", "smartctl not found (smartmontools): SMART data will be absent from the maintenance report")
     # the venv's own bin dir first (sudo drops it from PATH, and realpath(sys.executable) would leave the venv)
@@ -327,6 +444,9 @@ def check(device: Optional[str] = None, mounts: Optional[list] = None) -> Report
                 bad.append(f"{p} is on {m[0]}")
         if bad:
             r.add("nandwash install", "fail", "nandwash must live on the ROOT filesystem (only / is mounted in the maintenance boot): " + "; ".join(bad))
+        elif os.path.abspath(nw).startswith(("/home/", "/tmp/", "/var/tmp/", "/root/")):
+            r.add("nandwash install", "warn", f"{nw} is in a user/scratch directory, which may be cleaned or changed "
+                                              "under the runner. Install it to /opt/nandwash/venv")
         else:
             r.add("nandwash install", "ok", f"{nw} (python {os.path.realpath(sys.executable)}) is on the root filesystem")
 
@@ -371,6 +491,25 @@ def check(device: Optional[str] = None, mounts: Optional[list] = None) -> Report
                                                 "it may not be loaded in the maintenance boot")
                 else:
                     r.add("target bus", "ok", "same controller driver as the root disk")
+        # --- the live scan the offline boot works from (scanning offline would not fit the time budget)
+        if d.serial and d.eligible:
+            src = scan_report or find_scan_report(d.serial)
+            if not src:
+                r.add("scan report", "fail", f"no completed scan of serial {d.serial} found (looked in "
+                                             f"{', '.join(scan_report_dirs())}). Run `sudo nandwash scan {d.path}` first: "
+                                             "it is read-only and runs live; the offline boot only re-confirms and rewrites")
+            else:
+                rep_, lat, probs, warns = validate_scan(src, d.serial, d.size)
+                if probs:
+                    r.add("scan report", "fail", f"{src}: " + "; ".join(probs))
+                else:
+                    b = time_budget(rep_, lat)
+                    f.update(scan_report=src, scan_lat=os.path.join(os.path.dirname(src), rep_["latency_file"]),
+                             budget=b)
+                    r.add("scan report", "warn" if warns else "ok",
+                          f"{src} ({rep_['created']}): median {b['median_us'] / 1000:.2f} ms, {b['candidates']} candidate "
+                          f"chunks. Offline limits: pick {b['pick_limit']}s + fix {b['fix_limit']}s, "
+                          f"max run {b['maxrun']}s" + ("; " + "; ".join(warns) if warns else ""))
     else:
         r.add("target", "info", "no DEVICE given: drive-specific checks skipped")
     return r
@@ -382,7 +521,7 @@ def plan(rep: Report) -> dict:
     f = rep.facts
     if rep.failures:
         raise ValueError("machine is not supported: " + "; ".join(c.detail for c in rep.failures))
-    for k in ("device", "serial", "kernel_grub", "boot_uuid", "grub_dir", "nw"):
+    for k in ("device", "serial", "kernel_grub", "boot_uuid", "grub_dir", "nw", "scan_report", "budget"):
         if k not in f:
             raise ValueError(f"cannot plan: missing {k} (give a DEVICE and run on a supported machine)")
     script = os.path.join(os.path.dirname(__file__), "data", "nandwash-maint")
@@ -391,19 +530,27 @@ def plan(rep: Report) -> dict:
     entry = render_entry(f["boot_uuid"], f["boot_fstype"], f["kernel_grub"], f["initrd_grub"], f["args"])
     cfgpath = f"{f['grub_dir']}/custom.cfg"
     existing = _read(cfgpath)
+    b = f["budget"]
+    staged = os.path.join(INPUT_DIR, os.path.basename(f["scan_report"]))
+    staged_lat = os.path.join(INPUT_DIR, os.path.basename(f["scan_lat"]))
+    conf = render_conf({"SERIAL": f["serial"], "DEVICE_HINT": f["device"], "NW": f["nw"], "SCAN_REPORT": staged,
+                        "PICK_LIMIT": b["pick_limit"], "FIX_LIMIT": b["fix_limit"], "MAXRUN": b["maxrun"],
+                        "WDT_MODULE": f["wdt_module"], "WDT_IDENT": f["wdt_ident"]})
     return {
         "files": [
             {"path": MAINT_PATH, "mode": "0755", "action": _state(MAINT_PATH, sha_of=sha), "sha256": sha[:16],
              "content": "(the maintenance runner shipped inside nandwash)"},
             {"path": CONF_PATH, "mode": "0644", "action": "overwrite" if os.path.exists(CONF_PATH) else "create",
-             "content": render_conf(f["device"], f["serial"], f["nw"], f["wdt_module"], f["wdt_ident"])},
+             "content": conf},
+            {"path": staged, "mode": "0644", "action": "copy", "content": f"copy of {f['scan_report']}"},
+            {"path": staged_lat, "mode": "0644", "action": "copy", "content": f"copy of {f['scan_lat']}"},
             {"path": cfgpath, "mode": "0644",
              "action": ("replace managed block" if MARK_BEGIN in existing else "append block") if existing else "create",
              "content": managed_block(entry)},
         ],
         "run": f"sudo {os.path.basename(f['reboot_tool'])} {ENTRY_ID} && sudo reboot",
         "undo": [f"remove the block between '{MARK_BEGIN}' and '{MARK_END}' from {cfgpath}",
-                 f"rm {MAINT_PATH} {CONF_PATH}", "(the one-shot entry is consumed by one boot; nothing else to undo)"],
+                 f"rm -r {MAINT_PATH} {CONF_PATH} {INPUT_DIR}", "(the one-shot entry is consumed by one boot; nothing else to undo)"],
         "untouched": ["the normal boot entries", "grub.cfg itself (custom.cfg is read at boot)", "the kernel and initramfs",
                       "the target drive (nothing is read or written until you run the maintenance boot)"],
     }

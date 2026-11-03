@@ -148,11 +148,8 @@ def _behind_thunderbolt(name: str) -> bool:
 
 
 def _serial(name: str, path: str) -> str:
-    s = _read(f"/sys/block/{name}/device/serial") or _read(f"/sys/block/{name}/serial")
-    if s:
-        return s
-    from .device import _udev_serial
-    return _udev_serial(path) or ""
+    from .device import read_serial
+    return read_serial(name, path)
 
 
 def describe(name: str, mounts: Optional[dict] = None, swaps: Optional[set] = None) -> Optional[Drive]:

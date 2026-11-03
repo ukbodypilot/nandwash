@@ -9,10 +9,13 @@ from . import targeted
 
 
 def pick_slow(scan_report: str, factor: float = 1.8, max_chunks: int = 500, expect_serial: str = "",
-              assume_ssd: bool = False, log: Callable[[str], None] = print) -> Tuple[dict, DeviceInfo]:
-    """Read-only. Returns ({offsets, median_us, threshold_us, candidates}, DeviceInfo)."""
+              assume_ssd: bool = False, log: Callable[[str], None] = print,
+              device: str = "") -> Tuple[dict, DeviceInfo]:
+    """Read-only. Returns ({offsets, median_us, threshold_us, candidates}, DeviceInfo).
+    `device` overrides the path recorded in the report (names can differ between boots); the serial
+    must still match the report."""
     rep, lat = rpt.load(scan_report)
-    info = DeviceInfo.probe(rep["device"])
+    info = DeviceInfo.probe(device or rep["device"])
     if info.serial != rep["serial"] or (expect_serial and info.serial != expect_serial):
         raise ValueError(f"serial mismatch: device is '{info.serial}', report is '{rep['serial']}'"
                          + (f", expected '{expect_serial}'" if expect_serial else ""))

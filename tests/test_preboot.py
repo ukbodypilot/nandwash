@@ -17,7 +17,8 @@ class T(unittest.TestCase):
 
     def test_cmdline(self):
         a = pb.parse_cmdline("BOOT_IMAGE=/boot/vmlinuz-linux root=UUID=abc rw quiet splash loglevel=3 init=/sbin/x resume=UUID=zz resume_offset=5")
-        self.assertEqual(pb.maint_cmdline(a), ["root=UUID=abc", "loglevel=3", "ro", "init=" + pb.MAINT_PATH])
+        self.assertEqual(pb.maint_cmdline(a), ["root=UUID=abc", "loglevel=3", "ro", "panic=30", "init=" + pb.MAINT_PATH])
+        self.assertNotIn("panic=0", pb.maint_cmdline(pb.parse_cmdline("root=x panic=0")))
 
     def test_initrds(self):
         with tempfile.TemporaryDirectory() as d:
@@ -35,10 +36,49 @@ class T(unittest.TestCase):
         e = pb.render_entry("U-U", "ext4", "/boot/vmlinuz-linux", ["/boot/intel-ucode.img", "/boot/initramfs-linux.img"],
                             ["root=UUID=abc", "ro", "init=" + pb.MAINT_PATH])
         self.assertIn("--id nandwash-maint", e)
+        self.assertIn("insmod part_gpt", e)
         self.assertIn("search --no-floppy --fs-uuid --set=root U-U", e)
         self.assertIn("linux /boot/vmlinuz-linux root=UUID=abc ro init=" + pb.MAINT_PATH, e)
         self.assertIn("initrd /boot/intel-ucode.img /boot/initramfs-linux.img", e)
         self.assertTrue(pb.managed_block(e).startswith(pb.MARK_BEGIN))
+
+    def test_conf_quoted(self):
+        import subprocess
+        c = pb.render_conf({"SERIAL": "AB 12;$(touch /x)", "NW": "/opt/nandwash/venv/bin/nandwash", "MAXRUN": 900})
+        out = subprocess.run(["bash", "-c", c + 'printf "%s|%s|%s" "$SERIAL" "$MAXRUN" "$PICK_LIMIT"'],
+                             capture_output=True, text=True).stdout
+        self.assertEqual(out, "AB 12;$(touch /x)|900|")
+        with self.assertRaises(ValueError):
+            pb.render_conf({"EVIL": "1"})
+
+    def test_budget(self):
+        from array import array
+        lat = array("f", [1000.0] * 1000 + [5000.0] * 10)       # 10 chunks at 5x the 1 ms median
+        b = pb.time_budget({}, lat)
+        self.assertEqual(b["candidates"], 10)
+        self.assertEqual(b["median_us"], 1000.0)
+        self.assertEqual((b["pick_limit"], b["fix_limit"]), (300, 300))   # floors
+        self.assertEqual(b["maxrun"], 660)
+        big = pb.time_budget({}, array("f", [1000.0] * 1000 + [400000.0] * 600))
+        self.assertGreater(big["pick_limit"], 1400)                       # 2 * 600 * 3 * 0.4 s + 120
+        self.assertEqual(big["maxrun"], big["pick_limit"] + big["fix_limit"] + 60)
+
+    def test_validate_scan(self):
+        import json
+        from array import array
+        with tempfile.TemporaryDirectory() as d:
+            rep = {"mode": "scan", "complete": True, "serial": "S1", "total_bytes": 4 * 1048576, "chunk_size": 1048576,
+                   "created": "2026-11-01T00:00:00", "latency_file": "r.lat"}
+            json.dump(rep, open(os.path.join(d, "r.json"), "w"))
+            array("f", [900.0, 1000.0, 1100.0, 3000.0]).tofile(open(os.path.join(d, "r.lat"), "wb"))
+            from datetime import datetime
+            now = datetime.fromisoformat("2026-11-03T00:00:00").timestamp()
+            _r, _l, probs, warns = pb.validate_scan(os.path.join(d, "r.json"), "S1", 4 * 1048576, now)
+            self.assertEqual((probs, warns), ([], []))
+            _r, _l, probs, _w = pb.validate_scan(os.path.join(d, "r.json"), "S2", 8 * 1048576, now)
+            self.assertEqual(len(probs), 2)
+            _r, _l, _p, warns = pb.validate_scan(os.path.join(d, "r.json"), "S1", 4 * 1048576, now + 30 * 86400)
+            self.assertTrue(warns)
 
     def test_verdict(self):
         r = pb.Report()

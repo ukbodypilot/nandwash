@@ -1,10 +1,11 @@
 #!/bin/bash
 # nandwash offline maintenance. Runs as PID 1 (kernel arg init=/usr/local/sbin/nandwash-maint) with the
-# root filesystem mounted READ-ONLY and no other service running. It rewrites the chunks listed in
-# /etc/nandwash/chunks.json, saves a report, and reboots. Whatever happens, it ends in a reboot.
+# root filesystem mounted READ-ONLY and no other service running. It works from a scan made LIVE beforehand
+# (staged in /var/lib/nandwash-maint/input): re-confirms the slow chunks, rewrites them (each one is
+# timed before and after), saves a report and reboots. Whatever happens, it ends in a reboot.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
-CONF=/etc/nandwash/maint.conf          # DEVICE=/dev/sda ; SERIAL=... ; MAXRUN=900
-CHUNKS=/etc/nandwash/chunks.json
+export PYTHONDONTWRITEBYTECODE=1
+CONF=/etc/nandwash/maint.conf      # written by `nandwash preboot install`; every value shell-quoted
 OUT=/var/lib/nandwash-maint
 W=/run/nw
 
@@ -30,8 +31,10 @@ disarm() {
 }
 
 . $CONF 2>/dev/null || { log "no $CONF; nothing to do"; exit 0; }
-MAXRUN=${MAXRUN:-900}
-log "start: device=$DEVICE serial=$SERIAL maxrun=${MAXRUN}s kernel=$(uname -r)"
+PICK_LIMIT=${PICK_LIMIT:-600}; FIX_LIMIT=${FIX_LIMIT:-600}
+MIN=$(( PICK_LIMIT + FIX_LIMIT + 60 ))
+MAXRUN=${MAXRUN:-$MIN}; [ "$MAXRUN" -lt "$MIN" ] && MAXRUN=$MIN    # never let the watchdog cut a step short
+log "start: serial=$SERIAL pick=${PICK_LIMIT}s fix=${FIX_LIMIT}s maxrun=${MAXRUN}s kernel=$(uname -r)"
 
 # 1. Root MUST be read-only (superblock options). Otherwise do not touch the disk.
 if awk '$5=="/"{split($0,a," - "); split(a[2],b," "); if (b[3] ~ /(^|,)rw(,|$)/) f=1} END{exit !f}' /proc/self/mountinfo; then
@@ -46,7 +49,7 @@ WDT=""; WT=0
 for w in /sys/class/watchdog/watchdog*; do
   [ -r "$w/identity" ] && [ "$(cat "$w/identity")" = "$WDT_IDENT" ] && { WDT=/dev/$(basename "$w"); WT=$(cat "$w/timeout" 2>/dev/null); }
 done
-if [ -n "$WDT" ] && [ -c "$WDT" ] && [ "${WT:-0}" -ge 20 ]; then
+if [ -n "$WDT_IDENT" ] && [ -n "$WDT" ] && [ -c "$WDT" ] && [ "${WT:-0}" -ge 20 ]; then
   exec 9>"$WDT"
   DEADLINE=$(( $(date +%s) + MAXRUN + 120 ))
   ( while [ "$(date +%s)" -lt "$DEADLINE" ]; do echo . >&9 2>/dev/null; sleep 5; done ) &
@@ -56,11 +59,10 @@ else
   log "no usable watchdog (ident='$WDT_IDENT' dev='$WDT' timeout='$WT'); continuing without"
 fi
 
-# 3. The work: scan -> confirm slow chunks -> rewrite them -> rescan -> compare. Every step is time-bounded;
-# a failed or timed-out step skips the steps that depend on it, never the save/reboot at the end.
-NW=${NW:-/opt/nandwash/venv/bin/nandwash}   # maint.conf may set NW; must live on the root filesystem
+# 3. The work. Every step is time-bounded; a failed step skips the ones that depend on it, never the save/reboot.
+NW=${NW:-/opt/nandwash/venv/bin/nandwash}
 NWPY=$(dirname "$NW")/python3
-export HOME=$W                                  # reports/progress go to tmpfs; root is read-only
+export HOME=$W                                  # anything nandwash writes goes to tmpfs; root is read-only
 step() { # name timeout cmd...
   local n=$1 t=$2; shift 2
   log "step $n: start (limit ${t}s)"
@@ -68,33 +70,38 @@ step() { # name timeout cmd...
   log "step $n: exit $rc"; tail -n 3 $W/$n.out | tee -a $W/log >/dev/console 2>&1
   return $rc
 }
-latest() { ls -t $W/.nandwash/reports/*-scan-*.json 2>/dev/null | head -n 1; }
 RC=0
-if step scan1 "${SCAN_LIMIT:-900}" $NW scan "$DEVICE"; then
-  SCAN1=$(latest)
-  if [ -n "$SCAN1" ] && step pick 600 $NW pick-slow "$SCAN1" $W/slow.json --expect-serial "$SERIAL"; then
-    # Rewrite only what scan1 found persistently slow (the 60 metadata chunks were already done last boot).
+# Device names are not stable across boots: find the ONE disk carrying the serial (same reader as the guard).
+DEVICE=$(timeout 60 "$NWPY" -c '
+import os, sys
+from nandwash.device import read_serial
+hits = [n for n in sorted(os.listdir("/sys/block")) if read_serial(n, "/dev/" + n) == sys.argv[1]]
+print("/dev/" + hits[0] if len(hits) == 1 else "")' "$SERIAL" 2>$W/resolve.out)
+if [ -z "$SERIAL" ] || [ -z "$DEVICE" ]; then
+  log "ABORT: no unique disk with serial '$SERIAL' (installed for ${DEVICE_HINT:-?}); nothing touched"; RC=3
+elif [ ! -r "$SCAN_REPORT" ]; then
+  log "ABORT: staged scan report '$SCAN_REPORT' missing; nothing touched"; RC=3
+else
+  log "target: $DEVICE (serial $SERIAL; installed as $DEVICE_HINT)"
+  if step pick "$PICK_LIMIT" "$NW" pick-slow "$SCAN_REPORT" $W/slow.json --device "$DEVICE" --expect-serial "$SERIAL"; then
     N=$("$NWPY" -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["offsets"]))' $W/slow.json 2>/dev/null)
     if [ "${N:-0}" -gt 0 ]; then
-      step fix "${FIX_LIMIT:-900}" $NW refresh-chunks "$DEVICE" $W/slow.json \
-        --allow-readonly-mounts --yes --expect-serial "$SERIAL" --report $W/report.json --backup-dir $W/backup || RC=$?
+      # refresh-chunks times every chunk before and after its rewrite: that is the evidence, no rescan needed.
+      step fix "$FIX_LIMIT" "$NW" refresh-chunks "$DEVICE" $W/slow.json \
+        --allow-readonly-mounts --yes --expect-serial "$SERIAL" --report $W/report.json || RC=$?
     else
-      log "no persistently slow chunks found; nothing to rewrite"
+      log "no persistently slow chunks confirmed; nothing to rewrite"
     fi
-    if step scan2 "${SCAN_LIMIT:-900}" $NW scan "$DEVICE"; then
-      SCAN2=$(latest)
-      [ -n "$SCAN2" ] && [ "$SCAN2" != "$SCAN1" ] && step compare 120 $NW compare "$SCAN1" "$SCAN2"
-    fi
+  else
+    RC=$?
   fi
-else
-  RC=$?
 fi
 log "pipeline done (rc $RC)"
 dmesg 2>/dev/null | tail -n 200 > $W/dmesg.txt
 
 # 4. Save results (briefly remount rw: nothing else is running, work is finished).
 if mount -o remount,rw / 2>/dev/null; then
-  D=$OUT/$(date +%Y%m%dT%H%M%S); mkdir -p "$D" && cp -r $W/log $W/*.out $W/report.json $W/slow.json $W/dmesg.txt $W/.nandwash/reports "$D"/ 2>/dev/null
+  D=$OUT/$(date +%Y%m%dT%H%M%S); mkdir -p "$D" && cp $W/log $W/*.out $W/report.json $W/slow.json $W/dmesg.txt "$D"/ 2>/dev/null
   sync; mount -o remount,ro / 2>/dev/null; log "results saved to $D"
 else
   log "could not remount rw; results not saved (see console)"
