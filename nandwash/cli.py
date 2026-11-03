@@ -84,22 +84,53 @@ def main(assume_ssd):
     _ASSUME_SSD = assume_ssd
 
 
-def _drive_table(ds, numbered: bool = False):
+_CAP_COLS = (("check", "check"), ("live", "live"), ("offline-chunks", "chunks"), ("full", "full"),
+             ("offline-boot", "boot"))
+
+
+def _mark(c) -> str:
+    return "[green]yes[/]" if c.ok else "[yellow] ? [/]" if c.ok is None else "[dim] - [/]"
+
+
+def _drive_table(ds, numbered: bool = False, aliases: dict | None = None):
+    """Fits 80 columns: who the drive is and what it can do. Reasons go below the table (`_drive_reasons`)."""
     from rich.table import Table
     from .drives import human
-    t = Table(title="Drives")
+    rev = {v: k for k, v in (aliases or {}).items()}
+    from rich import box
+    t = Table(title="Drives", box=box.SIMPLE_HEAD, pad_edge=False, padding=(0, 1))
     if numbered:
         t.add_column("#", justify="right")
-    for c in ("Device", "Drive", "Serial", "Size", "Bus", "Mounted", "Can do"):
-        t.add_column(c, no_wrap=(c == "Serial"), overflow="fold")
+    for c in ("Dev", "ID", "Drive", "Size", "Bus"):
+        t.add_column(c, no_wrap=c != "Drive", overflow="fold", min_width=14 if c == "Drive" else None)
+    t.add_column("Can do", overflow="fold")
     for i, d in enumerate(ds, 1):
-        mounted = ", ".join(f"{m}{'' if w else ' (ro)'}" for p in d.partitions for m, w in p.mounts[:1]) or "-"
         flag = " [red]SYSTEM[/]" if d.is_system else ""
-        row = [d.path, d.title + (" [dim]removable[/]" if d.removable else "") + flag, d.serial or "?",
-               human(d.size), d.transport + ("+TB" if d.thunderbolt else "") + (" ROT" if d.rotational else ""), mounted,
-               d.modes if d.eligible else f"[red]{d.modes}[/]"]
+        ident = d.id + (f"\n[cyan]{rev[d.id]}[/]" if d.id in rev else "")
+        row = [d.name, ident, d.title + flag, human(d.size).replace(" ", ""),
+               d.transport + ("+TB" if d.thunderbolt else "") + (" ROT" if d.rotational else "")]
+        can = [label + ("?" if d.caps[k].ok is None else "") for k, label in _CAP_COLS
+               if k in d.caps and d.caps[k].ok is not False]
+        row.append(" ".join(can) if can else "[red]nothing[/]")
         t.add_row(*([str(i)] if numbered else []), *row)
     return t
+
+
+def _drive_reasons(ds, verbose: bool = False) -> None:
+    """One block per drive: serial, mounts, and why each capability is yes / no."""
+    for d in ds:
+        mounts = ", ".join(f"{m}{'' if w else ' (ro)'}" for p in d.partitions for m, w in p.mounts[:1]) or "not mounted"
+        console.print(f"[bold]{d.name}[/] {d.id}  serial {d.serial or '?'}  {mounts}", highlight=False)
+        for k, label in _CAP_COLS:
+            c = d.caps.get(k)
+            if c is None or (not verbose and not c.reasons):
+                continue
+            if not verbose and k != "check" and not d.can("check"):
+                continue
+            console.print(f"    {label:6s} {_mark(c)}  [dim]{'; '.join(c.reasons)}[/]", highlight=False)
+        for n in d.notes:
+            if verbose or "THUNDERBOLT" in n or "USB" in n:
+                console.print(f"    [dim]note: {n}[/]", highlight=False)
 
 
 def _choose_device(device):
@@ -114,9 +145,7 @@ def _choose_device(device):
         console.print(_drive_table(ds))
         raise click.ClickException("no DEVICE given. Pass one of the paths above (or run interactively to pick).")
     console.print(_drive_table(ds, numbered=True))
-    for d in ds:
-        for n in d.notes:
-            console.print(f"[dim]{d.path}: {n}[/]")
+    _drive_reasons(ds)
     n = click.prompt("Which drive number", type=click.IntRange(1, len(ds)))
     d = ds[n - 1]
     if d.is_system:
@@ -127,18 +156,123 @@ def _choose_device(device):
 
 @main.command("list")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def list_cmd(as_json):
-    """List attached drives (SATA, NVMe, USB) and what nandwash can safely do with each."""
+@click.option("-v", "--verbose", is_flag=True, help="Every reason and note, for yes and no.")
+def list_cmd(as_json, verbose):
+    """List attached drives and what nandwash can safely do with each, with the reason.
+
+    \b
+    check   scan + re-read, read-only
+    live    rewrite free-space chunks while mounted (ext4/xfs)
+    chunks  rewrite chosen chunks: nothing has the drive mounted read-write
+    full    whole-surface rewrite: nothing mounted
+    boot    rewrite in-use chunks in the offline maintenance boot (? = run `preboot check`)"""
     from .drives import enumerate_drives
+    from .state import load_aliases
     ds = enumerate_drives()
+    aliases = load_aliases()
     if as_json:
         import json
-        click.echo(json.dumps([d.to_dict() for d in ds], indent=1))
+        rev = {v: k for k, v in aliases.items()}
+        out = []
+        for d in ds:
+            x = d.to_dict()
+            x["alias"] = rev.get(d.id)
+            out.append(x)
+        click.echo(json.dumps({"nandwash_list": 1, "drives": out}, indent=1))
         return
-    console.print(_drive_table(ds))
-    for d in ds:
+    console.print(_drive_table(ds, aliases=aliases))
+    _drive_reasons(ds, verbose)
+
+
+@main.command("alias")
+@click.argument("drive", required=False)
+@click.argument("name", required=False)
+@click.option("--remove", "remove", metavar="NAME", help="Delete an alias.")
+def alias_cmd(drive, name, remove):
+    """Name a drive: `nandwash alias sda data-m600` (DRIVE is any selector naming one drive).
+    With no arguments, list the aliases."""
+    from . import selection as sl
+    from .drives import enumerate_drives
+    from .state import load_aliases, remove_alias, set_alias
+    if remove:
+        _require_root()
+        console.print("removed" if remove_alias(remove) else f"no alias {remove!r}")
+        return
+    if not drive:
+        for k, v in sorted(load_aliases().items()):
+            console.print(f"{k:20s} {v}", highlight=False)
+        return
+    if not name:
+        raise click.UsageError("give DRIVE and NAME")
+    _require_root()
+    try:
+        s = sl.resolve(enumerate_drives(), drive, load_aliases())
+        if len(s.drives) != 1:
+            raise click.ClickException(f"{drive!r} selects {len(s.drives)} drives; name exactly one")
+        set_alias(name, s.drives[0].id)
+    except (sl.SelectorError, ValueError) as e:
+        raise click.ClickException(str(e))
+    console.print(f"{name} -> {s.drives[0].id} ({s.drives[0].name}, {s.drives[0].title})", highlight=False)
+
+
+def _goal_opt(f):
+    return click.option("--goal", type=click.Choice(["check", "refresh", "refresh-full"]), default="check",
+                        show_default=True, help="check = read-only; refresh = rewrite what can be rewritten now; "
+                        "refresh-full = whole-surface rewrite of unmounted drives.")(f)
+
+
+def _make_plan(drives_sel: str, goal: str):
+    from . import plan as pl, selection as sl
+    from .drives import enumerate_drives
+    from .state import load_aliases
+    ds = enumerate_drives()
+    try:
+        s = sl.resolve(ds, drives_sel, load_aliases(), write=goal != "check")
+    except sl.SelectorError as e:
+        raise click.ClickException(str(e))
+    return pl.make(s, goal)
+
+
+def _show_plan(p) -> None:
+    from rich.table import Table
+    from . import plan as pl
+    from .drives import human
+    from rich import box
+    if not p.drives:
+        console.print(f"[bold]Plan: {p.goal}[/]: nothing to do on the selected drives.")
+    t = Table(title=f"Plan: {p.goal}", box=box.SIMPLE_HEAD, pad_edge=False)
+    for c in ("Dev", "ID", "Drive", "Steps", "Time"):
+        t.add_column(c, overflow="fold", no_wrap=c in ("Dev", "ID", "Time"))
+    for d in p.drives:
+        t.add_row(d.name or "?", d.id, f"{d.model} {human(d.size)}" + (" [red]SYSTEM[/]" if d.system else ""),
+                  " -> ".join(d.steps), pl.human_s(d.est_s))
+    if p.drives:
+        console.print(t)
+    for d in p.drives:
         for n in d.notes:
-            console.print(f"[dim]{d.path}: {n}[/]")
+            console.print(f"  [dim]{d.name}: {n}[/]", highlight=False)
+    for label, why in p.refused:
+        console.print(f"  [yellow]skipped[/] {label}: {why}", highlight=False)
+    total = sum(d.est_s or 0 for d in p.drives)
+    console.print(f"{len(p.drives)} drive(s), one at a time, about {pl.human_s(total)}. "
+                  + ("[bold]This plan WRITES to the drives.[/]" if p.writes else "Read-only."))
+
+
+@main.command("plan")
+@click.option("--drives", "drives_sel", default="all", show_default=True,
+              help="Selector: all, sda, serial:X, id:nw-..., an alias, model:GLOB, bus:sata|nvme|usb|tb; -TERM excludes.")
+@_goal_opt
+@click.option("-o", "--output", type=click.Path(dir_okay=False, writable=True),
+              help="Save the plan as TOML (review/edit it, then `nandwash run FILE`).")
+def plan_cmd(drives_sel, goal, output):
+    """Show what a goal would do on each selected drive. Writes nothing to any drive."""
+    from . import plan as pl
+    p = _make_plan(drives_sel, goal)
+    _show_plan(p)
+    if output:
+        with open(output, "w") as f:
+            f.write(pl.to_toml(p))
+        console.print(f"saved {output}")
 
 
 @main.command()
