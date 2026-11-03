@@ -80,6 +80,28 @@ class T(unittest.TestCase):
             _r, _l, _p, warns = pb.validate_scan(os.path.join(d, "r.json"), "S1", 4 * 1048576, now + 30 * 86400)
             self.assertTrue(warns)
 
+    def test_merge_block(self):
+        blk = pb.managed_block("menuentry x {\n}\n")
+        self.assertEqual(pb.merge_block("", blk), blk)
+        mine = "menuentry mine {\n}"
+        once = pb.merge_block(mine, blk)
+        self.assertEqual(once, mine + "\n" + blk)
+        self.assertEqual(pb.merge_block(once, pb.managed_block("menuentry y {\n}\n")).count(pb.MARK_BEGIN), 1)
+        self.assertEqual(pb.merge_block(once, ""), mine + "\n")
+        with self.assertRaises(ValueError):
+            pb.merge_block(pb.MARK_BEGIN + "\nfoo\n", blk)
+
+    def test_apply_writes_atomically(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "src"); open(src, "w").write("SRC")
+            pl = {"files": [{"path": os.path.join(d, "a/b/run"), "mode": "0755", "src": src},
+                            {"path": os.path.join(d, "c.cfg"), "mode": "0644", "data": "DATA\n"}]}
+            pb.apply(pl, log=lambda m: None)
+            self.assertEqual(open(os.path.join(d, "a/b/run")).read(), "SRC")
+            self.assertEqual(os.stat(os.path.join(d, "a/b/run")).st_mode & 0o777, 0o755)
+            self.assertEqual(open(os.path.join(d, "c.cfg")).read(), "DATA\n")
+            self.assertFalse([x for x in os.listdir(d) if x.endswith(".nw-tmp")])
+
     def test_verdict(self):
         r = pb.Report()
         r.add("a", "ok", ""); self.assertEqual(r.verdict, "supported")

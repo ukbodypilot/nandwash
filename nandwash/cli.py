@@ -485,12 +485,16 @@ def preboot_check(device, scan_report, as_json):
 @click.argument("device", required=False, type=click.Path(exists=True))
 @click.option("--from-scan", "scan_report", type=click.Path(exists=True, dir_okay=False),
               help="Live scan report to work from (default: the newest completed scan of DEVICE's serial).")
-@click.option("--dry-run", is_flag=True, help="Show exactly what would be written. Required: the real install is not enabled yet.")
-def preboot_install(device, scan_report, dry_run):
-    """Preview installing the maintenance boot for DEVICE. Writes nothing."""
+@click.option("--dry-run", is_flag=True, help="Show exactly what would be written, and write nothing.")
+@click.option("--yes", is_flag=True, help="Do not ask for confirmation.")
+def preboot_install(device, scan_report, dry_run, yes):
+    """Install the one-shot maintenance boot for DEVICE (or preview it with --dry-run).
+
+    Installing writes the runner, its config, a copy of the scan report and one GRUB entry; it does NOT
+    reboot and does not select the entry. Boot it once with the command printed at the end."""
     from . import preboot as pb
     if not dry_run:
-        raise click.ClickException("the real install is not enabled yet; run with --dry-run to see what it would do.")
+        _require_root()
     device = _choose_device(device)
     rep = pb.check(device, scan_report=scan_report)
     try:
@@ -502,7 +506,8 @@ def preboot_install(device, scan_report, dry_run):
         raise click.ClickException(str(e))
     for c in rep.warnings:
         console.print(f"{_ICON['warn']:>14}  [bold]{c.name}[/]: {c.detail}", highlight=False)
-    console.print("\n[bold]DRY RUN: nothing has been written.[/] An install would:\n")
+    console.print("\n[bold]DRY RUN: nothing has been written.[/] An install would:\n" if dry_run else
+                  "\n[bold]This install writes:[/]\n")
     for fl in pl["files"]:
         console.print(f"[bold]{fl['action']:>22}[/]  {fl['path']}  (mode {fl['mode']})", highlight=False)
         for ln in fl["content"].rstrip("\n").split("\n"):
@@ -512,3 +517,22 @@ def preboot_install(device, scan_report, dry_run):
     for u in pl["undo"]:
         console.print(f"  - {u}", highlight=False)
     console.print("[bold]Left untouched:[/] " + "; ".join(pl["untouched"]))
+    if dry_run:
+        return
+    if not yes:
+        click.confirm("Install the maintenance boot now? (nothing reboots)", abort=True)
+    try:
+        pb.apply(pl, log=lambda m: console.print(f"  {m}", highlight=False))
+    except (OSError, ValueError) as e:
+        raise click.ClickException(f"install failed part-way: {e}. Undo with `nandwash preboot uninstall`.")
+    console.print(f"[green]Installed.[/] Nothing changes until you boot it once: [bold]{pl['run']}[/]")
+
+
+@preboot.command("uninstall")
+@click.option("--grub-dir", default="/boot/grub", show_default=True, type=click.Path(file_okay=False))
+def preboot_uninstall(grub_dir):
+    """Remove everything `preboot install` wrote. Results under /var/lib/nandwash-maint are kept."""
+    from . import preboot as pb
+    _require_root()
+    pb.uninstall(grub_dir, log=lambda m: console.print(f"  {m}", highlight=False))
+    console.print("[green]Uninstalled.[/]")

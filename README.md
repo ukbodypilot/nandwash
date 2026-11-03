@@ -110,7 +110,16 @@ must match the drive's serial and size. It is copied to `/var/lib/nandwash-maint
 is found by serial (device names can change between boots) using SCSI VPD page 0x80, which needs no udev.
 The maintenance kernel gets `ro panic=30`, so a crash reboots back to the normal system.
 
-Both are read-only. The real install is deliberately not enabled yet. Supported: GRUB with an ext2/3/4 or XFS root
+Both are read-only. To install and run it once:
+
+```bash
+sudo nandwash preboot install DEVICE              # writes the runner, conf, staged scan and one GRUB entry; no reboot
+sudo grub-reboot nandwash-maint && sudo reboot    # one-shot: the boot after it is the normal one again
+ls /var/lib/nandwash-maint/                        # one folder per run: log, slow.json, report.json, dmesg.txt
+sudo nandwash preboot uninstall                    # remove the entry and files (results are kept)
+```
+
+Supported: GRUB with an ext2/3/4 or XFS root
 that is a plain partition, nandwash installed on the root filesystem, target drive on the internal bus. Anything
 else (systemd-boot, LUKS/LVM/RAID/btrfs/ZFS root, USB/Thunderbolt targets) is reported as unsupported with the
 reason. A missing hardware watchdog is a warning: the runner is then bounded by software time limits only.

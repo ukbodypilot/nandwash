@@ -540,14 +540,16 @@ def plan(rep: Report) -> dict:
     return {
         "files": [
             {"path": MAINT_PATH, "mode": "0755", "action": _state(MAINT_PATH, sha_of=sha), "sha256": sha[:16],
-             "content": "(the maintenance runner shipped inside nandwash)"},
+             "content": "(the maintenance runner shipped inside nandwash)", "src": script},
             {"path": CONF_PATH, "mode": "0644", "action": "overwrite" if os.path.exists(CONF_PATH) else "create",
-             "content": conf},
-            {"path": staged, "mode": "0644", "action": "copy", "content": f"copy of {f['scan_report']}"},
-            {"path": staged_lat, "mode": "0644", "action": "copy", "content": f"copy of {f['scan_lat']}"},
+             "content": conf, "data": conf},
+            {"path": staged, "mode": "0644", "action": "copy", "content": f"copy of {f['scan_report']}",
+             "src": f["scan_report"]},
+            {"path": staged_lat, "mode": "0644", "action": "copy", "content": f"copy of {f['scan_lat']}",
+             "src": f["scan_lat"]},
             {"path": cfgpath, "mode": "0644",
              "action": ("replace managed block" if MARK_BEGIN in existing else "append block") if existing else "create",
-             "content": managed_block(entry)},
+             "content": managed_block(entry), "data": merge_block(existing, managed_block(entry))},
         ],
         "run": f"sudo {os.path.basename(f['reboot_tool'])} {ENTRY_ID} && sudo reboot",
         "undo": [f"remove the block between '{MARK_BEGIN}' and '{MARK_END}' from {cfgpath}",
@@ -555,6 +557,79 @@ def plan(rep: Report) -> dict:
         "untouched": ["the normal boot entries", "grub.cfg itself (custom.cfg is read at boot)", "the kernel and initramfs",
                       "the target drive (nothing is read or written until you run the maintenance boot)"],
     }
+
+
+def merge_block(existing: str, block: str) -> str:
+    """custom.cfg with our managed block put in (replacing an old one); every other line kept as it was."""
+    if block:
+        assert block.startswith(MARK_BEGIN) and block.rstrip("\n").endswith(MARK_END)
+    out, skip = [], False
+    for ln in existing.splitlines(keepends=True):
+        if ln.rstrip("\n") == MARK_BEGIN:
+            skip = True
+        elif ln.rstrip("\n") == MARK_END and skip:
+            skip = False
+        elif not skip:
+            out.append(ln)
+    if skip:
+        raise ValueError("custom.cfg has an unterminated nandwash block; fix it by hand")
+    body = "".join(out)
+    if body and not body.endswith("\n"):
+        body += "\n"
+    return body + block
+
+
+def _write_atomic(path: str, data: bytes, mode: int) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.nw-tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+    dfd = os.open(os.path.dirname(path), os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def apply(pl: dict, log=print) -> None:
+    """Write what plan() describes. Each file is written atomically (tmp + fsync + rename); the GRUB entry last,
+    so the boot can never point at a runner, conf or scan that is not fully in place."""
+    for fl in pl["files"]:
+        if "src" in fl:
+            with open(fl["src"], "rb") as fh:
+                data = fh.read()
+        else:
+            data = fl["data"].encode()
+        _write_atomic(fl["path"], data, int(fl["mode"], 8))
+        log(f"wrote {fl['path']} ({len(data)} bytes)")
+
+
+def uninstall(grub_dir: str, log=print) -> None:
+    """Undo an install: drop our GRUB block (other custom.cfg lines kept), the runner, conf and staged input."""
+    cfg = os.path.join(grub_dir, "custom.cfg")
+    if MARK_BEGIN in _read(cfg):
+        with open(cfg) as fh:
+            rest = merge_block(fh.read(), "")
+        if rest.strip():
+            _write_atomic(cfg, rest.encode(), 0o644)
+        else:
+            os.remove(cfg)
+        log(f"removed the nandwash entry from {cfg}")
+    for p in (MAINT_PATH, CONF_PATH):
+        if os.path.exists(p):
+            os.remove(p); log(f"removed {p}")
+    if os.path.isdir(INPUT_DIR):
+        shutil.rmtree(INPUT_DIR); log(f"removed {INPUT_DIR}")
+    env = os.path.join(grub_dir, "grubenv")
+    if f"next_entry={ENTRY_ID}" in _read(env):          # a pending one-shot would point at a missing entry
+        tool = shutil.which("grub-editenv") or shutil.which("grub2-editenv")
+        if tool:
+            subprocess.run([tool, env, "unset", "next_entry"], check=False, timeout=30)
+            log(f"cleared the pending one-shot boot in {env}")
 
 
 def _state(path: str, sha_of: str) -> str:
