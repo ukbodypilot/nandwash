@@ -91,12 +91,12 @@ def _drive_table(ds, numbered: bool = False):
     if numbered:
         t.add_column("#", justify="right")
     for c in ("Device", "Drive", "Serial", "Size", "Bus", "Mounted", "Can do"):
-        t.add_column(c)
+        t.add_column(c, no_wrap=(c == "Serial"), overflow="fold")
     for i, d in enumerate(ds, 1):
         mounted = ", ".join(f"{m}{'' if w else ' (ro)'}" for p in d.partitions for m, w in p.mounts[:1]) or "-"
         flag = " [red]SYSTEM[/]" if d.is_system else ""
         row = [d.path, d.title + (" [dim]removable[/]" if d.removable else "") + flag, d.serial or "?",
-               human(d.size), d.transport + (" ROT" if d.rotational else ""), mounted,
+               human(d.size), d.transport + ("+TB" if d.thunderbolt else "") + (" ROT" if d.rotational else ""), mounted,
                d.modes if d.eligible else f"[red]{d.modes}[/]"]
         t.add_row(*([str(i)] if numbered else []), *row)
     return t

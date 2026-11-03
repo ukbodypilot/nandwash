@@ -59,6 +59,7 @@ class Drive:
     partitions: List[Partition] = field(default_factory=list)
     holders: List[str] = field(default_factory=list)
     is_system: bool = False
+    thunderbolt: bool = False   # reached through a Thunderbolt PCIe tunnel (dock/enclosure): hot-unpluggable
     notes: List[str] = field(default_factory=list)
     eligible: bool = True
     modes: str = ""
@@ -123,6 +124,29 @@ def _transport(name: str) -> str:
     return "?"
 
 
+def _thunderbolt_bridges() -> set:
+    """PCI addresses of the bridges that carry Thunderbolt PCIe tunnels (the NHI's ancestors below the root
+    port). Any drive whose PCI path runs through one of them sits behind a Thunderbolt dock/enclosure."""
+    out: set = set()
+    base = "/sys/bus/thunderbolt/devices"
+    try:
+        doms = [x for x in os.listdir(base) if x.startswith("domain")]
+    except OSError:
+        return out
+    for dom in doms:
+        parts = os.path.realpath(f"{base}/{dom}").split("/")
+        pci = [x for x in parts if re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.\d", x)]
+        out.update(pci[1:-1])       # drop the root port (first) and the NHI itself (last)
+    return out
+
+
+def _behind_thunderbolt(name: str) -> bool:
+    bridges = _thunderbolt_bridges()
+    if not bridges:
+        return False
+    return any(x in bridges for x in os.path.realpath(f"/sys/block/{name}").split("/"))
+
+
 def _serial(name: str, path: str) -> str:
     s = _read(f"/sys/block/{name}/device/serial") or _read(f"/sys/block/{name}/serial")
     if s:
@@ -163,6 +187,7 @@ def describe(name: str, mounts: Optional[dict] = None, swaps: Optional[set] = No
         d.holders += os.listdir(f"{base}/holders")
     except OSError:
         pass
+    d.thunderbolt = _behind_thunderbolt(name)
     d.is_system = any(m in _SYSTEM_MOUNTS for p in d.partitions for m, _w in p.mounts) or \
         any(p.swap for p in d.partitions)
     _judge(d)
@@ -182,6 +207,9 @@ def _judge(d: Drive) -> None:
         d.notes.append("used by device-mapper/md/LVM layers: " + ", ".join(sorted(set(d.holders))))
     if d.is_system:
         d.notes.append("SYSTEM disk (holds / or boot/swap)")
+    if d.thunderbolt:
+        d.notes.append("THUNDERBOLT dock/enclosure: hot-unpluggable. Keep the dock powered and the cable seated "
+                       "during rewrites (a drive that vanishes mid-write can leave a chunk half-written)")
     if d.transport == "usb":
         d.notes.append("USB: serial may belong to the bridge, not the drive; check it before --expect-serial")
     mounted = [p for p in d.partitions if p.mounted]
