@@ -196,6 +196,49 @@ def refresh(device, resume, max_temp, yes, hash_data):
     _execute(device, "refresh", resume, max_temp, hash_data=hash_data)
 
 
+@main.command("refresh-chunks")
+@click.argument("device", type=click.Path(exists=True))
+@click.argument("chunks_file", type=click.Path(exists=True))
+@click.option("--allow-readonly-mounts", is_flag=True,
+              help="Permit filesystems on the device that are mounted READ-ONLY (offline maintenance boot).")
+@click.option("--report", type=click.Path(), help="Write a JSON result here.")
+@click.option("--backup-dir", type=click.Path(file_okay=False), help="Save each chunk's original bytes here first.")
+@click.option("--chunk-size", default=1048576, show_default=True)
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+def refresh_chunks_cmd(device, chunks_file, allow_readonly_mounts, report, backup_dir, chunk_size, yes):
+    """Rewrite ONLY the chunks listed in CHUNKS_FILE (JSON list of byte offsets, or {"offsets": [...]})."""
+    import json
+    from . import targeted
+    _require_root()
+    d = _probe(device)
+    data = json.load(open(chunks_file))
+    offsets = data["offsets"] if isinstance(data, dict) else data
+    held = targeted.holders_of(d)
+    if held:
+        raise click.ClickException(f"{device} is used by device-mapper/md layers ({', '.join(held)}); refusing.")
+    mounts = targeted.mounts_of(d)
+    rw = [m for m in mounts if m[2]]
+    if rw:
+        raise click.ClickException("refusing: mounted READ-WRITE: " + ", ".join(f"{s} on {t}" for s, t, _ in rw) +
+                                   "\nUnmount, or boot a read-only maintenance environment.")
+    if mounts and not allow_readonly_mounts:
+        raise click.ClickException("device has read-only mounts (" + ", ".join(f"{s} on {t}" for s, t, _ in mounts) +
+                                   "); pass --allow-readonly-mounts to proceed.")
+    if not yes:
+        click.confirm(f"Rewrite {len(offsets)} chunks of {device}?", abort=True)
+    if backup_dir:
+        os.makedirs(backup_dir, exist_ok=True)
+    res = targeted.refresh_chunks(d.path, offsets, chunk_size, backup_dir, log=console.print)
+    if report:
+        with open(report, "w") as f:
+            json.dump(res, f, indent=2)
+    console.print(f"{res['chunks_ok']}/{res['chunks_requested']} chunks rewritten and verified; median read "
+                  f"{res['median_before_ms']} -> {res['median_after_ms']} ms" +
+                  (f"\n[red]STOPPED: {res['stopped']}[/]" if res["stopped"] else ""))
+    if res["stopped"]:
+        sys.exit(2)
+
+
 @main.command()
 @click.argument("before", type=click.Path(exists=True))
 @click.argument("after", type=click.Path(exists=True))
