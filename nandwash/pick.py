@@ -21,8 +21,11 @@ def pick_slow(scan_report: str, factor: float = 1.8, max_chunks: int = 500, expe
                          + (f", expected '{expect_serial}'" if expect_serial else ""))
     med = rpt.percentile(rpt._measured(lat), 50)
     thr = med * factor
-    cands = sorted((i for i, x in enumerate(lat) if x > thr), key=lambda i: -lat[i])
     cs = rep["chunk_size"]
+    # Only whole chunks: the disk's last chunk is usually shorter than chunk_size, and refresh-chunks
+    # rewrites whole aligned chunks only (a full-size read there fails with a short read).
+    whole = info.total_bytes // cs
+    cands = sorted((i for i, x in enumerate(lat) if x > thr and i < whole), key=lambda i: -lat[i])
     confirmed = []
     with DirectDevice(info.path, writable=False) as dev:
         for i in cands:

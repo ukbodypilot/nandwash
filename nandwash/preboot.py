@@ -154,7 +154,8 @@ def time_budget(rep: dict, lat, factor: float = PICK_FACTOR, max_chunks: int = M
     v = sorted(x for x in lat if x > 0)
     med = v[(len(v) - 1) // 2] if v else 0.0
     thr = med * factor
-    cands = sorted((x for x in lat if x > thr), reverse=True)
+    whole = rep["total_bytes"] // rep["chunk_size"] if rep.get("chunk_size") else len(lat)
+    cands = sorted((x for i, x in enumerate(lat) if x > thr and i < whole), reverse=True)   # as pick-slow
     pick_s = 2 * sum(3 * x for x in cands) / 1e6
     top = cands[:max_chunks]
     fix_s = 2 * (sum(9 * x for x in top) / 1e6 + 0.5 * len(top))
