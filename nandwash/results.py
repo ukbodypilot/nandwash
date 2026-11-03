@@ -76,7 +76,8 @@ def card(h: dict, aliases: Optional[dict] = None) -> List[Tuple[str, str]]:
     if r.get("state") == "errors":
         rows.append(("SMART", f"[red]{r.get('why', '')}[/]"))
     elif sc:
-        rows.append(("SMART", "no error counters rose (" + ", ".join(f"{k}={v}" for k, v in sorted(sc.items())) + ")"))
+        rows.append(("SMART", "no error counters rose (" + ", ".join(f"{k}={v}" for k, v in sorted(sc.items())) + ")"
+                     + "".join(f"\n         [yellow]{n}[/]" for n in r.get("smart_notes") or [])))
     sa = r.get("slow_again")
     runs = h["runs"]
     if len(runs) > 1 or sa:
@@ -142,6 +143,6 @@ def to_json(hs: List[dict], aliases: Optional[dict] = None, full: bool = False) 
                     "median_ms": r.get("median_ms"), "p99_ms": r.get("p99_ms"), "noise": r.get("noise"),
                     "candidates": r.get("candidates"), "confirmed": r.get("confirmed"), "severe": r.get("severe"),
                     "errors": r.get("errors"), "slow_again": r.get("slow_again"),
-                    "smart_counters": r.get("smart_counters"), "next": next_step(h, r).replace("[bold red]", "")
+                    "smart_counters": r.get("smart_counters"), "smart_notes": r.get("smart_notes") or [], "next": next_step(h, r).replace("[bold red]", "")
                     .replace("[/]", ""), **({"history": h["runs"]} if full else {})})
     return {"nandwash_result": RESULT_VERSION, "drives": out}

@@ -345,6 +345,7 @@ class Runner:
                "candidates": pk.get("candidates"), "confirmed": pk.get("confirmed"), "severe": pk.get("severe"),
                "state": state_, "why": pk.get("why", ""), "slow_again": pk.get("slow_again"),
                "smart_counters": pk.get("smart_counters") or health.smart_counters(scan.get("smart_after")),
+               "smart_notes": pk.get("smart_notes") or [],
                "outcome": oc, "next": (r.get("queue_offline") or {}).get("next", "")}
         jd["health"] = state_
         jd["exit"] = health.exit_code(state_, (oc or {}).get("outcome"))

@@ -37,8 +37,28 @@ def pick_slow(scan_report: str, factor: float = 1.8, max_chunks: int = 500, expe
         if noise_n:     # PLAN B2: how far do re-reads of NORMAL chunks drift from the scan on this drive?
             sample = health.noise_sample(lat, med, noise_n, seed=info.serial, whole=whole)
             noise = health.noise_band([lat[i] for i in sample], [targeted._timed_read(dev, i * cs, cs) for i in sample])
+    smart_now = _settle_pending(info.path, rep.get("smart_before")) if noise_n else None
     return {"offsets": sorted(confirmed), "median_us": med, "threshold_us": thr, "candidates": len(cands),
-            "chunk_size": cs, "noise": noise}, info
+            "chunk_size": cs, "noise": noise, "smart_now": smart_now}, info
+
+
+def _settle_pending(path: str, smart_before: Optional[dict], wait_s: float = health.PENDING_SETTLE_S,
+                    every_s: float = 15.0, sleep=None, poll=None) -> Optional[dict]:
+    """SMART after the re-reads. If 197 (pending) is still above its pre-scan value, re-poll for up to `wait_s`:
+    a drive often clears it by itself (health.smart_rises). Returns the last snapshot dict (None: no SMART)."""
+    import time
+    from .smart import poll_smart
+    sleep, poll = sleep or time.sleep, poll or poll_smart
+    base = health.smart_counters(smart_before).get(health.PENDING)
+    waited = 0.0
+    while True:
+        snap = poll(path)
+        d = snap.to_dict() if snap else None
+        cur = health.smart_counters(d).get(health.PENDING)
+        if d is None or base is None or cur is None or cur <= base or waited >= wait_s:
+            return d
+        sleep(every_s)
+        waited += every_s
 
 
 def verdict(res: dict, lat, nchunks: int, rep: Optional[dict] = None, prev_counters: Optional[dict] = None) -> dict:
@@ -51,12 +71,16 @@ def verdict(res: dict, lat, nchunks: int, rep: Optional[dict] = None, prev_count
     severe = health.severe_count(conf, lat, cs, med)
     before = health.smart_counters(rep.get("smart_before"))
     after = health.smart_counters(rep.get("smart_after")) or before
-    up = health.smart_increases(before, after)
+    now = health.smart_counters(res.get("smart_now")) or None
+    up, notes = health.smart_rises(before, after, now)
     if prev_counters:
         up += [x for x in health.smart_increases(prev_counters, before) if x not in up]
+    after = now or after
     st = health.drive_state(complete=bool(rep.get("complete")), error_sectors=len(rep.get("error_sectors") or []),
                             smart_up=up, noise=res.get("noise"), confirmed_n=len(conf), severe_n=severe,
                             nchunks=nchunks)
-    return {**st, "confirmed": len(conf), "severe": severe, "chunks": nchunks, "line": health.line(nchunks),
+    if notes:
+        st["why"] = "; ".join([st["why"]] * bool(st["why"]) + notes)
+    return {**st, "smart_notes": notes, "confirmed": len(conf), "severe": severe, "chunks": nchunks, "line": health.line(nchunks),
             "share_pct": round(100.0 * len(conf) / nchunks, 4) if nchunks else 0.0,
             "median_ms": round(med / 1000.0, 3), "noise": res.get("noise"), "smart_counters": after}

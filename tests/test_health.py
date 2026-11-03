@@ -74,6 +74,49 @@ class Rules(unittest.TestCase):
         self.assertEqual(H.smart_increases(b, a), ["SMART 197 pending 0 -> 1"])
         self.assertEqual(H.smart_increases(a, b), [])
 
+    def test_pending_that_clears_is_not_an_error(self):
+        # mini sdd 2026-11-03 (M500): 197 0 -> 1 during a read-only scan, 0 again minutes later, 5/187/198 flat
+        b, a = {"5": 5636096, "197": 0, "198": 0}, {"5": 5636096, "197": 1, "198": 0}
+        errs, notes = H.smart_rises(b, a, now={"5": 5636096, "197": 0, "198": 0})
+        self.assertEqual(errs, [])
+        self.assertIn("transient", notes[0])
+        self.assertEqual(H.smart_rises(b, a, now=a)[0], ["SMART 197 pending 0 -> 1"])     # still up: errors
+        self.assertEqual(H.smart_rises(b, a)[0], ["SMART 197 pending 0 -> 1"])            # no recheck taken
+        grown = {**a, "5": 5636097, "197": 0}                                             # totals never forgiven
+        self.assertEqual(H.smart_rises(b, grown, now={**grown})[0], ["SMART 5 reallocated 5636096 -> 5636097"])
+
+    def test_settle_pending_polls_until_clear(self):
+        from nandwash import pick
+
+        class Snap:
+            def __init__(self, v):
+                self.v = v
+
+            def to_dict(self):
+                return {"attributes": {"197": {"raw": self.v}}}
+        seq, slept = [1, 1, 0], []
+        d = pick._settle_pending("/dev/x", {"attributes": {"197": {"raw": 0}}}, sleep=slept.append,
+                                 poll=lambda p: Snap(seq.pop(0)))
+        self.assertEqual((H.smart_counters(d), len(slept)), ({"197": 0}, 2))
+        slept.clear()
+        d = pick._settle_pending("/dev/x", {"attributes": {"197": {"raw": 0}}}, wait_s=30, sleep=slept.append,
+                                 poll=lambda p: Snap(1))
+        self.assertEqual((H.smart_counters(d), sum(slept)), ({"197": 1}, 30))
+        self.assertIsNone(pick._settle_pending("/dev/x", None, poll=lambda p: None))
+
+    def test_verdict_with_transient_pending_is_healthy(self):
+        from nandwash import pick
+        sm = lambda v: {"attributes": {"5": {"raw": 0}, "197": {"raw": v}}}
+        res = {"offsets": [6291456], "median_us": 3000.0, "chunk_size": CS, "noise": None, "smart_now": sm(0)}
+        v = pick.verdict(res, [3000.0] * 1000, 1000, rep={"complete": True, "smart_before": sm(0),
+                                                          "smart_after": sm(1)})
+        self.assertEqual(v["state"], "healthy")
+        self.assertIn("transient", v["why"])
+        self.assertEqual(v["smart_counters"]["197"], 0)
+        res["smart_now"] = sm(1)
+        self.assertEqual(pick.verdict(res, [3000.0] * 1000, 1000, rep={"complete": True, "smart_before": sm(0),
+                                                                       "smart_after": sm(1)})["state"], "errors")
+
     def test_exit_codes(self):
         self.assertEqual(H.exit_code("healthy", None), 0)
         self.assertEqual(H.exit_code("slow-regions", None), 1)

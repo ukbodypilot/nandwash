@@ -7,7 +7,7 @@ Pure functions over latency arrays (scan, microseconds per chunk, 0 = unmeasured
 from __future__ import annotations
 
 import random
-from typing import Iterable, List, Optional, Sequence
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 # Tunables. Calibrated on .140 sda and mini sdb, 2026-11-02/03 (PLAN B0, B3).
 FACTOR = 1.8          # candidate / confirmed: > FACTOR x drive median
@@ -111,6 +111,27 @@ def smart_increases(before: Optional[dict], after: Optional[dict]) -> List[str]:
         if b is not None and a is not None and a > b:
             out.append(f"SMART {aid} {name} {b} -> {a}")
     return out
+
+
+# 197 (pending) is a live count, not a total: it can go up during a read and back down once the drive re-reads or
+# remaps the sector. A Micron M500 did 0 -> 1 -> 0 within minutes on two different read-only scans (mini sdb + sdd,
+# 2026-11-03), with 5/187/198 flat and an empty error log. So 197 counts only if it is STILL up after the re-reads
+# (and a short wait); the totals 5/187/198 count as soon as they move.
+PENDING = "197"
+PENDING_SETTLE_S = 120
+
+
+def smart_rises(before: Optional[dict], after: Optional[dict], now: Optional[dict] = None) -> Tuple[List[str], List[str]]:
+    """(error lines, notes). `after` = end of the scan, `now` = a read after the re-reads (None: not taken)."""
+    errs = smart_increases(before, after)
+    notes = []
+    if now:
+        for x in [x for x in errs if x.startswith(f"SMART {PENDING} ")]:
+            b, n = (before or {}).get(PENDING), now.get(PENDING)
+            if b is not None and n is not None and n <= b:
+                errs.remove(x)
+                notes.append(f"{x} during the scan, back to {n} after the re-reads (transient)")
+    return errs, notes
 
 
 def drive_state(*, complete: bool, error_sectors: int, smart_up: Sequence[str], noise: Optional[dict],

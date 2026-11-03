@@ -184,7 +184,8 @@ def render(h: dict, share: bool = False, aliases: Optional[dict] = None) -> str:
     sc = r.get("smart_counters") or {}
     if sc:
         out.append('<dt>SMART</dt><dd>' + ", ".join(f'{_e(health.ERROR_ATTRS.get(int(k), k))} {v}'
-                                                    for k, v in sorted(sc.items())) + '</dd>')
+                                                    for k, v in sorted(sc.items()))
+                   + "".join(f'<br><span class="s-partly">{_e(n)}</span>' for n in r.get("smart_notes") or []) + '</dd>')
     sa = r.get("slow_again")
     if sa:
         out.append(f'<dt>Fixes held?</dt><dd>{sa["of"] - sa["count"]} of {sa["of"]} earlier fixes still fast'

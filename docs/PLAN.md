@@ -232,6 +232,21 @@ p95 1.03-1.04, 0/200 false positives on both drives):
   longest freeze 268 ms); the one-shot offline boot then re-confirmed 169 and rewrote them (168 `fixed`, 7.55 -> 2.47 ms,
   ~3 min away from the network). Re-check against the same scan: **445 -> 3 confirmed**, state `slow-regions` -> `healthy`,
   outcome `improved` (441/443 fixed). SMART 5/187/196/197/198 unchanged.
+- The mini's other three drives, 2026-11-03 (live scan + re-read with this rule, nothing written):
+
+  | drive | chunks | median | candidates 1.8-3x / 3-5x / 5-10x / >10x | confirmed | state |
+  |---|---|---|---|---|---|
+  | sda, Crucial M600 1 TB | 976,763 | 2.33 ms | 299 / 1 / 16 / 0 | 0 | `healthy` |
+  | sdc, T-FORCE 512 GB | 488,387 | 3.02 ms | 70 / 1 / 14 / 0 | 1 (~5x) | `healthy` |
+  | sdd, Crucial M500 480 GB (64,386 h, 80% life) | 457,863 | 3.05 ms | 1342 / 6 / 16 / 0 | 1 (1.9x) | `healthy` |
+
+  Together with .140 sda, these four drives behave the same way: candidates are re-read noise, and almost
+  none confirm. The rule separates sdb-before (445) from all of them by more than 20x.
+- **SMART 197 can be transient.** sdd's 197 (pending) went 0 -> 1 during its read-only scan and was back to 0 minutes
+  later, with 5/187/198 flat and an empty error log. sdb (also an M500) did the same this morning. As first written,
+  the rule turned that into `errors` / "back up this drive now". Now 197 counts only if it is still up after the
+  re-reads, re-polled for up to 120 s. A cleared rise is shown on the card as a note. The totals 5/187/198 count as
+  soon as they move.
 - Lessons: (1) a scan goes stale within hours, so confirm right after the scan, never from an old report;
   (2) the per-boot 500-chunk cap is redundant with the time budget; (3) the state rule needs count + severity,
   not one percentage (settled above).
@@ -298,7 +313,7 @@ No email or chat integrations: each one is a dependency plus credentials to mana
 4. ~~done~~ `results` (card + one-line list + `--history`), `--json` schema + a test that pins it.
 5. ~~done~~ `report DRIVE --html [-o FILE] [--share]`: card, read-time histogram, disk map, history; one file, inline SVG + CSS, no JS, light/dark. `--share` drops serial, device, paths, hostname (tested).
 6. ~~done~~ Exit codes + `--on-result` (`_job-run` exits with the code, so a background job's unit fails on 1-3); `contrib/nandwash-check.{service,timer}` (monthly check, AC power only, `SuccessExitStatus=1`, deliberately no idle I/O class: queued reads look slow).
-7. ~~Calibrate the `slow-regions` line~~ done 2026-11-03 (B3); re-check on the mini's other two drives.
+7. ~~Calibrate the `slow-regions` line~~ done 2026-11-03 (B3), re-checked on the mini's other three drives (all `healthy`).
 
 ---
 
