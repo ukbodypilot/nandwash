@@ -40,27 +40,60 @@ fi
 log "root is read-only: ok"
 
 # 2. Hardware watchdog, kicked only until a deadline. A hang past it resets the machine.
-[ -n "$WDT_MODULE" ] && modprobe -q "$WDT_MODULE" 2>/dev/null && sleep 1     # no udev here: load it ourselves
-if [ -c /dev/watchdog ]; then
-  exec 9>/dev/watchdog
+# Find the watchdog by NAME (numbering differs without udev). Arm it only if its timeout leaves wide margin.
+[ -n "$WDT_MODULE" ] && modprobe -q "$WDT_MODULE" 2>/dev/null; sleep 1
+WDT=""; WT=0
+for w in /sys/class/watchdog/watchdog*; do
+  [ -r "$w/identity" ] && [ "$(cat "$w/identity")" = "$WDT_IDENT" ] && { WDT=/dev/$(basename "$w"); WT=$(cat "$w/timeout" 2>/dev/null); }
+done
+if [ -n "$WDT" ] && [ -c "$WDT" ] && [ "${WT:-0}" -ge 20 ]; then
+  exec 9>"$WDT"
   DEADLINE=$(( $(date +%s) + MAXRUN + 120 ))
   ( while [ "$(date +%s)" -lt "$DEADLINE" ]; do echo . >&9 2>/dev/null; sleep 5; done ) &
   KPID=$!
-  log "watchdog armed (stops being kicked after $((MAXRUN + 120))s)"
+  log "watchdog $WDT ($WDT_IDENT, ${WT}s) armed; kicked every 5s until ${MAXRUN}s+120s, then lets it reset the machine"
 else
-  log "no watchdog device"
+  log "no usable watchdog (ident='$WDT_IDENT' dev='$WDT' timeout='$WT'); continuing without"
 fi
 
-# 3. The work.
-timeout -k 10 "$MAXRUN" /opt/nandwash/venv/bin/nandwash refresh-chunks "$DEVICE" "$CHUNKS" \
-  --allow-readonly-mounts --yes --expect-serial "$SERIAL" --report $W/report.json --backup-dir $W/backup \
-  > $W/nandwash.out 2>&1
-RC=$?
-log "nandwash exit code $RC"; tail -n 5 $W/nandwash.out | tee -a $W/log >/dev/console 2>&1
+# 3. The work: scan -> confirm slow chunks -> rewrite them -> rescan -> compare. Every step is time-bounded;
+# a failed or timed-out step skips the steps that depend on it, never the save/reboot at the end.
+NW=/opt/nandwash/venv/bin/nandwash
+export HOME=$W                                  # reports/progress go to tmpfs; root is read-only
+step() { # name timeout cmd...
+  local n=$1 t=$2; shift 2
+  log "step $n: start (limit ${t}s)"
+  timeout -k 10 "$t" "$@" > $W/$n.out 2>&1; local rc=$?
+  log "step $n: exit $rc"; tail -n 3 $W/$n.out | tee -a $W/log >/dev/console 2>&1
+  return $rc
+}
+latest() { ls -t $W/.nandwash/reports/*-scan-*.json 2>/dev/null | head -n 1; }
+RC=0
+if step scan1 "${SCAN_LIMIT:-900}" $NW scan "$DEVICE"; then
+  SCAN1=$(latest)
+  if [ -n "$SCAN1" ] && step pick 600 $NW pick-slow "$SCAN1" $W/slow.json --expect-serial "$SERIAL"; then
+    # Rewrite only what scan1 found persistently slow (the 60 metadata chunks were already done last boot).
+    N=$(/opt/nandwash/venv/bin/python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["offsets"]))' $W/slow.json 2>/dev/null)
+    if [ "${N:-0}" -gt 0 ]; then
+      step fix "${FIX_LIMIT:-900}" $NW refresh-chunks "$DEVICE" $W/slow.json \
+        --allow-readonly-mounts --yes --expect-serial "$SERIAL" --report $W/report.json --backup-dir $W/backup || RC=$?
+    else
+      log "no persistently slow chunks found; nothing to rewrite"
+    fi
+    if step scan2 "${SCAN_LIMIT:-900}" $NW scan "$DEVICE"; then
+      SCAN2=$(latest)
+      [ -n "$SCAN2" ] && [ "$SCAN2" != "$SCAN1" ] && step compare 120 $NW compare "$SCAN1" "$SCAN2"
+    fi
+  fi
+else
+  RC=$?
+fi
+log "pipeline done (rc $RC)"
+dmesg 2>/dev/null | tail -n 200 > $W/dmesg.txt
 
 # 4. Save results (briefly remount rw: nothing else is running, work is finished).
 if mount -o remount,rw / 2>/dev/null; then
-  D=$OUT/$(date +%Y%m%dT%H%M%S); mkdir -p "$D" && cp -r $W/log $W/nandwash.out $W/report.json "$D"/ 2>/dev/null
+  D=$OUT/$(date +%Y%m%dT%H%M%S); mkdir -p "$D" && cp -r $W/log $W/*.out $W/report.json $W/slow.json $W/dmesg.txt $W/.nandwash/reports "$D"/ 2>/dev/null
   sync; mount -o remount,ro / 2>/dev/null; log "results saved to $D"
 else
   log "could not remount rw; results not saved (see console)"

@@ -242,6 +242,39 @@ def refresh_chunks_cmd(device, chunks_file, allow_readonly_mounts, report, backu
         sys.exit(2)
 
 
+@main.command("pick-slow")
+@click.argument("scan_report", type=click.Path(exists=True))
+@click.argument("out_file", type=click.Path())
+@click.option("--factor", default=1.8, show_default=True, help="Candidate = latency above this multiple of the scan median.")
+@click.option("--max-chunks", default=500, show_default=True, help="Safety cap on how many chunks to select (slowest first).")
+@click.option("--expect-serial", help="Refuse unless the device's serial number matches.")
+def pick_slow(scan_report, out_file, factor, max_chunks, expect_serial):
+    """Select chunks that are persistently slow: candidates from a scan report, re-read 3x here (read-only)."""
+    import json
+    from . import targeted
+    from .device import DirectDevice
+    _require_root()
+    rep, lat = rpt.load(scan_report)
+    d = _probe(rep["device"])
+    if d.serial != rep["serial"] or (expect_serial and d.serial != expect_serial):
+        raise click.ClickException("serial mismatch; refusing.")
+    med = rpt.percentile(rpt._measured(lat), 50)
+    thr = med * factor
+    cands = sorted((i for i, x in enumerate(lat) if x > thr), key=lambda i: -lat[i])
+    cs = rep["chunk_size"]
+    confirmed = []
+    with DirectDevice(d.path, writable=False) as dev:
+        for i in cands:
+            if len(confirmed) >= max_chunks:
+                break
+            if targeted._timed_read(dev, i * cs, cs) * 1000.0 > thr:
+                confirmed.append(i * cs)
+    json.dump({"offsets": sorted(confirmed), "median_us": med, "threshold_us": thr, "candidates": len(cands)},
+              open(out_file, "w"), indent=1)
+    console.print(f"median {med / 1000:.2f} ms, threshold {thr / 1000:.2f} ms: {len(cands)} candidates, "
+                  f"{len(confirmed)} confirmed persistently slow")
+
+
 @main.command()
 @click.argument("before", type=click.Path(exists=True))
 @click.argument("after", type=click.Path(exists=True))
