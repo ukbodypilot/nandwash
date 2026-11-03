@@ -24,12 +24,29 @@ The expert commands stay. The new layer is glue over them, not a rewrite: `engin
 
 ### A1. Drive identity
 
-`DriveId = (serial, model, size_bytes)`. The serial comes from `device.read_serial` (sysfs → udev → VPD 0x80).
-Add `wwid` (`/sys/block/X/device/wwid`) when present; it is more unique than the serial on some USB bridges.
+**Identity** is built only from what the drive itself reports, which survives reboots, port changes and reformatting:
+`(wwid or serial, model, size_bytes)`. The serial comes from `device.read_serial` (sysfs → udev → VPD 0x80), and
+`wwid` (`/sys/block/X/device/wwid`) is used when present.
 
-- When a selected drive is touched, the `DriveId` is matched again. A mismatch skips that drive with a reason;
+**Short ID for people:** `nw-` + the first 6 hex characters of a SHA-256 of that tuple, e.g. `nw-3f9a2c`.
+- It is used in tables, selectors (`id:nw-3f9a2c`), plan files and report filenames.
+- It stands in for the serial in shareable reports (answers B5's anonymisation question).
+- On a collision, the ID is lengthened.
+
+**Aliases:** `nandwash alias nw-3f9a2c data-m600` saves a user-chosen name in `/var/lib/nandwash/aliases.json`.
+Selectors accept the alias too.
+
+**Never part of the identity** (all are shown as the drive's *current location* instead):
+- the `/dev/sdX` name: it changes between boots, so history and plans would break
+- filesystem labels and UUIDs: they change on reformat, a dd clone copies them, and a disk has several or none
+
+Rules:
+- When a selected drive is touched, its identity is matched again. A mismatch skips that drive with a reason;
   it never falls back to the `/dev` name.
-- USB: if two drives report the same serial (cheap bridges do), both are marked `ambiguous-id`, and writing to them is refused.
+- **Same-serial drives (cheap USB bridges):** first tie-break on the GPT disk GUID (it changes only on repartition),
+  then on the physical port (`/dev/disk/by-path`). If **only the port** tells them apart, the drives are marked
+  `ambiguous-id`. Reads are allowed; writes are refused, because swapping two identical enclosures between ports
+  would silently swap the IDs.
 
 ### A2. What each drive can do (capability)
 
@@ -65,6 +82,7 @@ The resolved per-drive steps are the **plan**. A plan row reads like:
 all                 every drive with capability >= check
 sda                 by current name (resolved to its serial immediately; the plan stores the serial)
 serial:13080900A1B2
+id:nw-3f9a2c  data-m600    short ID or alias (A1)
 model:*M500*        glob on model
 bus:sata|nvme|usb   transport
 -sdc  -bus:usb      exclude
@@ -182,7 +200,7 @@ A verdict needs to know how noisy the drive's latency is. Options: (a) require a
 
 - Exact slow threshold (today: pick 1.8x median; compare >3x median and >1 ms). One definition, used everywhere.
 - Do we email/notify at all, or leave that to the timer's journal?
-- Should results be anonymised by default in `--html` (serial hashed) for public sharing?
+- Anonymised `--html` (short ID instead of serial, see A1): default on or off?
 
 ---
 
