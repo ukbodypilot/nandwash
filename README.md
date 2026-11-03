@@ -25,6 +25,26 @@ Requires Python 3.10+, root (`sudo`), and optionally `smartctl` (smartmontools) 
 
 ## Usage
 
+The quickest way in is `sudo nandwash` with no command. It lists the drives and what it can do on each,
+asks which drives and which goal (`check` is read-only; `refresh` rewrites slow chunks), shows the plan,
+and runs it.
+
+```bash
+nandwash list [-v] [--json]                              # drives, short IDs (nw-xxxxxx), what is possible + why
+nandwash plan --drives all,-bus:usb --goal refresh -o p.toml   # what would happen; writes nothing
+sudo nandwash run p.toml                                 # or: run --drives sda,id:nw-3f9a2c --goal check
+sudo nandwash run --drives all --goal check --background # under systemd-run; survives the terminal
+nandwash status [--json]                                 # follow the running (or latest) job
+sudo nandwash resume | cancel                            # Ctrl+C / systemctl stop pause; a kill is resumable too
+sudo nandwash alias sdc backup-tb                        # name a drive; use the name in --drives
+```
+
+Jobs run one drive at a time, check each drive again right before every write, and keep their state in
+`/var/lib/nandwash/` (jobs, reports, progress, aliases). Reports from older versions in `~/.nandwash` are
+copied there on the first run. Writing to the system disk always asks for the last 4 characters of its serial.
+
+The single-drive commands are still there for experts:
+
 ```bash
 sudo nandwash list                                      # every attached drive (SATA/NVMe/USB) + what is safe on it
 sudo nandwash info    [/dev/sdX]                        # device info + SMART summary
@@ -39,7 +59,7 @@ enclosures report an SSD as rotational: pass `nandwash --assume-ssd ...` once yo
 ### Fixing only what is slow
 
 ```bash
-sudo nandwash scan /dev/sdX                                     # 1. latency map  -> ~/.nandwash/reports/*.json
+sudo nandwash scan /dev/sdX                                     # 1. latency map  -> /var/lib/nandwash/reports/
 sudo nandwash refresh-free /dev/sdX --from-scan <report.json> --dry-run   # 2. what could be fixed live?
 sudo nandwash refresh-free /dev/sdX --from-scan <report.json>             # 3. fix it, live
 sudo nandwash scan /dev/sdX && nandwash compare <before.json> <after.json>  # 4. prove it
@@ -65,13 +85,13 @@ With `sudo`, pipx-installed tools may not be on root's `PATH`; use `sudo $(which
 | Triggers FTL relocation | no | yes |
 | Use for | finding slow/bad regions | countering charge decay |
 
-Progress is saved to `~/.nandwash/<serial>.json` every 60 s and on Ctrl+C; use `--resume` to continue. The file is removed on successful completion. A before/after SMART comparison is printed at the end.
+Progress is saved to `/var/lib/nandwash/progress/<serial>.json` every 60 s (10 s in jobs) and on Ctrl+C; use `--resume` to continue. The file is removed on successful completion. A before/after SMART comparison is printed at the end.
 
 ## Is it actually working?
 
 Charge decay is invisible to the host (the drive's ECC hides it), so nandwash measures proxies and tells you plainly when it can't prove anything:
 
-1. **Read latency map.** Every chunk's read time is recorded (`time.perf_counter_ns`; each run saves a report in `~/.nandwash/reports/`). Decayed cells need ECC retries and read from slower. Run `scan`, `refresh`, `scan`, then `nandwash compare first.json last.json` to see whether the slow chunks got faster.
+1. **Read latency map.** Every chunk's read time is recorded (`time.perf_counter_ns`; each run saves a report in `/var/lib/nandwash/reports/`). Decayed cells need ECC retries and read from slower. Run `scan`, `refresh`, `scan`, then `nandwash compare first.json last.json` to see whether the slow chunks got faster.
 2. **Control run.** Latency is noisy, so do two scans with no refresh between them first; only differences bigger than that are meaningful.
 3. **Did the drive rewrite anything?** After a refresh, nandwash diffs the drive's write/erase/program counters and warns if none moved (the drive may have skipped identical writes).
 4. **ECC/SMART.** The full SMART attribute table is stored before/after and every changed counter is listed.

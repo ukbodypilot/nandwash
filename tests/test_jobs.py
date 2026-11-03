@@ -208,6 +208,17 @@ class LegacyImport(unittest.TestCase):
                     os.environ["HOME"] = old_home
 
 
+class Numbers(unittest.TestCase):
+    def test_parse(self):
+        from nandwash.cli import parse_numbers
+        self.assertEqual(parse_numbers("", 3), [0, 1, 2])
+        self.assertEqual(parse_numbers("3,1 1", 3), [0, 2])
+        self.assertEqual(parse_numbers("2-3", 4), [1, 2])
+        for bad in ("0", "4", "x", "3-2", ","):
+            with self.assertRaises(ValueError):
+                parse_numbers(bad, 3)
+
+
 class Verdict(unittest.TestCase):
     def test_rule(self):
         cs, med = 1048576, 1000.0

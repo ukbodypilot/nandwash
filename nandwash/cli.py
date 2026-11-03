@@ -72,17 +72,101 @@ def _analysis(st, d, interrupted: bool, path=None) -> None:
         console.print("To judge the effect, run a scan now and compare:  nandwash compare <before.json> <after.json>")
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option(__version__, prog_name="nandwash")
 @click.option("--assume-ssd", is_flag=True, help="Treat a drive that reports itself as rotational as an SSD "
               "(some USB enclosures misreport).")
-def main(assume_ssd):
-    """SSD NAND cell refresh utility for Linux."""
+@click.pass_context
+def main(ctx, assume_ssd):
+    """SSD NAND cell refresh utility for Linux.
+
+    Run with no command for the guided flow: pick drives, pick a goal, review the plan, run it.
+    """
     global _ASSUME_SSD
     _ASSUME_SSD = assume_ssd
     if os.geteuid() == 0:
         from .state import import_legacy
         import_legacy(log=lambda m: console.print(f"[dim]{m}[/]", highlight=False))
+    if ctx.invoked_subcommand is None:
+        if not sys.stdin.isatty():
+            click.echo(ctx.get_help())
+            return
+        _interactive()
+
+
+def parse_numbers(text: str, n: int) -> list:
+    """'1,3' / '2-4' / '' / 'all' -> sorted 0-based indices into a list of n. Raises ValueError."""
+    text = (text or "").strip().lower()
+    if text in ("", "all", "a"):
+        return list(range(n))
+    out = set()
+    for part in text.replace(" ", ",").split(","):
+        if not part:
+            continue
+        a, _, b = part.partition("-")
+        lo, hi = int(a), int(b or a)
+        if not (1 <= lo <= hi <= n):
+            raise ValueError(f"{part}: pick numbers between 1 and {n}")
+        out.update(range(lo - 1, hi))
+    if not out:
+        raise ValueError("nothing picked")
+    return sorted(out)
+
+
+_GOAL_MENU = (("check", "check: scan and find slow chunks. Read-only."),
+              ("refresh", "refresh: check, then rewrite the slow chunks it can rewrite now (live or offline)"),
+              ("refresh-full", "refresh-full: rewrite the whole surface of unmounted drives"))
+
+
+def _interactive() -> None:
+    from . import jobs, plan as pl, selection as sl
+    from .drives import enumerate_drives
+    from .state import load_aliases
+    running = jobs.latest(lambda j: jobs.effective_state(j) == "running")
+    if running:
+        console.print(f"Job {running['id']} is running.")
+        _job_summary(running)
+        return
+    paused = jobs.latest(jobs.resumable)
+    if paused and click.confirm(f"Job {paused['id']} ({paused['goal']}) is {jobs.effective_state(paused)}. "
+                                "Resume it?", default=True):
+        _require_root()
+        _run_job(paused, False, 70)
+        return
+    ds = [d for d in enumerate_drives() if d.can("check")]
+    if not ds:
+        raise click.ClickException("no drive nandwash can work on (see `nandwash list -v`)")
+    console.print(_drive_table(ds, numbered=True, aliases=load_aliases()))
+    _drive_reasons(ds)
+    while True:
+        try:
+            picked = [ds[i] for i in parse_numbers(click.prompt("Drives (e.g. 1,3 or 2-4; Enter = all)",
+                                                                default="", show_default=False), len(ds))]
+            break
+        except ValueError as e:
+            console.print(f"[yellow]{e}[/]")
+    for i, (_g, text) in enumerate(_GOAL_MENU, 1):
+        console.print(f"  {i}. {text}")
+    goal = _GOAL_MENU[click.prompt("Goal", type=click.IntRange(1, len(_GOAL_MENU)), default=1) - 1][0]
+    # Picking by number names each drive explicitly, so a picked SYSTEM disk is in (and asks for its serial).
+    sel = sl.resolve(ds, ",".join("id:" + d.id for d in picked), load_aliases(), write=goal != "check")
+    p = pl.make(sel, goal)
+    _show_plan(p)
+    if not p.drives:
+        return
+    if os.geteuid() != 0:
+        console.print("Starting needs root. Same plan: sudo nandwash run --drives "
+                      + ",".join("id:" + d.id for d in p.drives) + f" --goal {goal}")
+        return
+    pairs, problems = pl.validate(p, enumerate_drives())
+    if problems:
+        raise click.ClickException("drives changed while you chose: " + "; ".join(problems))
+    if p.writes:
+        _confirm_writes(pairs, yes=False)
+    elif not click.confirm("Start?", default=True):
+        return
+    bg = click.confirm("Run in the background (watch with `nandwash status`)?", default=False)
+    _run_job(jobs.create(p), bg, 70)
 
 
 _CAP_COLS = (("check", "check"), ("live", "live"), ("offline-chunks", "chunks"), ("full", "full"),
@@ -342,7 +426,8 @@ def _run_job(job, background: bool, max_temp: int) -> None:
         import shutil
         import subprocess
         exe = [sys.executable, "-m", "nandwash", "_job-run", job["id"], "--max-temp", str(max_temp)]
-        env = {k: os.environ[k] for k in ("NANDWASH_STATE", "NANDWASH_LOCK", "NANDWASH_TEST_LOOP", "PYTHONPATH", "HOME")
+        env = {k: os.environ[k] for k in ("NANDWASH_STATE", "NANDWASH_LOCK", "NANDWASH_TEST_LOOP", "NANDWASH_NO_IMPORT",
+                                          "PYTHONPATH", "HOME")
                if k in os.environ}
         if shutil.which("systemd-run"):
             cmd = ["systemd-run", f"--unit=nandwash-job-{job['id']}", "--collect", "--quiet",

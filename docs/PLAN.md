@@ -150,13 +150,13 @@ expert: scan, refresh, refresh-chunks, refresh-free, pick-slow, compare, info
 
 ### A7. Implementation steps (A)
 
-1. `drives.py`: a `Capability` dataclass; `_judge` fills it, and the old `modes` string is derived from it. Add `wwid` and `ambiguous-id`. Tests use fake sysfs trees.
-2. `select.py`: selector parser + resolver (pure functions, unit-tested), including the system-disk rule.
-3. `plan.py`: goal → per-drive steps, estimates (from the last scan if there is one), TOML read/write, the re-validation diff.
-4. `jobs.py`: job dir, `job.json` schema, flock, step runner calling the existing functions; resumable.
-5. `cli.py`: `plan`, `run`, `status`, `resume`, `cancel`, the interactive flow; `list` shows capabilities.
-6. State-dir move + one-shot import of old reports.
-7. Acceptance: a loop-device job of 3 drives (check + refresh) run foreground, then the same job `--background` with `status` attached
+1. ~~done~~ `drives.py`: a `Capability` dataclass; `_judge` fills it, and the old `modes` string is derived from it. Add `wwid` and `ambiguous-id`. Tests use fake sysfs trees.
+2. ~~done~~ (`selection.py`) selector parser + resolver (pure functions, unit-tested), including the system-disk rule.
+3. ~~done~~ `plan.py`: goal → per-drive steps, estimates (from the last scan if there is one), TOML read/write, the re-validation diff.
+4. ~~done~~ `jobs.py` (+ `passes.py`, the UI-free pass): job dir, `job.json` schema, flock, step runner calling the existing functions; resumable.
+5. ~~done~~ `cli.py`: `plan`, `run`, `status`, `resume`, `cancel`, the interactive flow; `list` shows capabilities.
+6. ~~done~~ State-dir move + one-shot import of old reports (copies, never moves; reports stay flat in `reports/`, per-serial subdirs wait for part B).
+7. ~~done~~ (`tests/acceptance_loop.sh`, PASS in 82 s on .140 2026-11-03; needs root, so not in CI yet) Acceptance: a loop-device job of 3 drives (check + refresh) run foreground, then the same job `--background` with `status` attached
    from a second shell, killed mid-way and resumed. Run in CI without real hardware.
 
 ---
