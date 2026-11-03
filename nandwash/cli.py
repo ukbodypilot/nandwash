@@ -204,13 +204,16 @@ def refresh(device, resume, max_temp, yes, hash_data):
 @click.option("--report", type=click.Path(), help="Write a JSON result here.")
 @click.option("--backup-dir", type=click.Path(file_okay=False), help="Save each chunk's original bytes here first.")
 @click.option("--chunk-size", default=1048576, show_default=True)
+@click.option("--expect-serial", help="Refuse unless the device's serial number matches (guards against renamed devices).")
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
-def refresh_chunks_cmd(device, chunks_file, allow_readonly_mounts, report, backup_dir, chunk_size, yes):
+def refresh_chunks_cmd(device, chunks_file, allow_readonly_mounts, report, backup_dir, chunk_size, expect_serial, yes):
     """Rewrite ONLY the chunks listed in CHUNKS_FILE (JSON list of byte offsets, or {"offsets": [...]})."""
     import json
     from . import targeted
     _require_root()
     d = _probe(device)
+    if expect_serial and d.serial != expect_serial:
+        raise click.ClickException(f"serial mismatch: {device} is '{d.serial}', expected '{expect_serial}'; refusing.")
     data = json.load(open(chunks_file))
     offsets = data["offsets"] if isinstance(data, dict) else data
     held = targeted.holders_of(d)
