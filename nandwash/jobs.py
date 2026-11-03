@@ -338,7 +338,7 @@ class Runner:
             n = len(scan.get("error_sectors") or [])
             state_ = "errors" if n else None
         row = {"date": _now(), "job": self.job["id"], "device": d.name, "goal": self.job["goal"], "steps": jd["steps"],
-               "scan_report": src, "complete": scan.get("complete"),
+               "scan_report": src, "slow_file": pk.get("file"), "complete": scan.get("complete"),
                "median_ms": round(ls["p50"] / 1000, 3) if ls.get("p50") else None,
                "p99_ms": round(ls["p99"] / 1000, 3) if ls.get("p99") else None,
                "errors": len(scan.get("error_sectors") or []), "noise": pk.get("noise"),

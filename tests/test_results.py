@@ -73,5 +73,49 @@ class Results(unittest.TestCase):
         self.assertEqual(results.spark([None]), "")
 
 
+class Html(unittest.TestCase):
+    def setUp(self):
+        import json
+        import os
+        from array import array
+        self.tmp = tempfile.TemporaryDirectory()
+        self._old = state.VAR_DIR
+        state.VAR_DIR = self.tmp.name
+        d = self.tmp.name
+        n, cs = 2000, 1048576
+        lat = array("f", [2000.0] * n)
+        for i in range(0, 60, 3):
+            lat[1900 + i // 3] = 8000.0
+        with open(os.path.join(d, "s.lat"), "wb") as f:
+            lat.tofile(f)
+        with open(os.path.join(d, "s.json"), "w") as f:
+            json.dump({"latency_file": "s.lat", "total_bytes": n * cs, "chunk_size": cs}, f)
+        with open(os.path.join(d, "slow.json"), "w") as f:
+            json.dump({"offsets": [1900 * cs, 1901 * cs]}, f)
+        history.add_run("nw-3f9a2c", "SECRETSERIAL", "Micron M600", {**ROW, "job": "j1", "outcome": None})
+        history.add_run("nw-3f9a2c", "SECRETSERIAL", "Micron M600",
+                        {**ROW, "scan_report": os.path.join(d, "s.json"), "slow_file": os.path.join(d, "slow.json"),
+                         "device": "sdq", "next": "sudo nandwash preboot install /dev/sdq --scan-report /root/x.json"})
+
+    def tearDown(self):
+        state.VAR_DIR = self._old
+        self.tmp.cleanup()
+
+    def test_page_and_share_leaks_nothing(self):
+        import socket
+        from nandwash import html
+        h = history.load("nw-3f9a2c")
+        page = html.render(h)
+        self.assertIn("<svg", page)
+        self.assertIn("SECRETSERIAL", page)
+        self.assertNotIn("<script", page)
+        self.assertNotIn("http", page.replace("https://github.com", ""))     # no external assets
+        shared = html.render(h, share=True)
+        for secret in ("SECRETSERIAL", "sdq", "/root/", self.tmp.name, socket.gethostname()):
+            self.assertNotIn(secret, shared, secret)
+        self.assertIn("Micron M600", shared)
+        self.assertIn("nw-3f9a2c", shared)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -38,6 +38,7 @@ nandwash status [--json]                                 # follow the running (o
 sudo nandwash resume | cancel                            # Ctrl+C / systemctl stop pause; a kill is resumable too
 sudo nandwash alias sdc backup-tb                        # name a drive; use the name in --drives
 nandwash results [DRIVE] [--history] [--json]           # health card per drive, or one line per drive
+nandwash report DRIVE --html -o r.html [--share]         # one-file page: card, histogram, disk map, history
 ```
 
 Every job ends with a verdict per drive:
@@ -53,6 +54,17 @@ Every job ends with a verdict per drive:
 `run` exits 0 (healthy/improved), 1 (slow/partly/no-effect/incomplete), 2 (inconclusive) or 3 (errors), and
 `--on-result CMD` pipes the results JSON into your own command (mail, ntfy, Home Assistant...). History is
 kept per drive in `/var/lib/nandwash/history/`, including how many earlier fixes are slow again.
+`--share` leaves out the serial, device names, paths and hostname, so the page is safe to post.
+
+A monthly read-only check runs if you install the units in `contrib/`:
+
+```bash
+sudo cp contrib/nandwash-check.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now nandwash-check.timer
+```
+
+It runs on AC power only. The unit counts exit 1 (slow regions) as success, so only `inconclusive`/`errors` fail it
+(add `--on-result` to the `ExecStart` line to be told either way).
 
 Jobs run one drive at a time, check each drive again right before every write, and keep their state in
 `/var/lib/nandwash/` (jobs, reports, progress, aliases). Reports from older versions in `~/.nandwash` are

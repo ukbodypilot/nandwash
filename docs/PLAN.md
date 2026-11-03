@@ -296,8 +296,8 @@ No email or chat integrations: each one is a dependency plus credentials to mana
 2. ~~done~~ Wire it into `check`/`refresh` jobs; the 200-chunk noise sample runs after every scan.
 3. ~~done~~ (as `/var/lib/nandwash/history/<id>.json`; reports stay flat) `index.json` per drive; "slow again" tracking of earlier fixed offsets.
 4. ~~done~~ `results` (card + one-line list + `--history`), `--json` schema + a test that pins it.
-5. `report --html` with inline SVG, plus `--share`.
-6. Exit codes + `--on-result` done (`_job-run` exits with the code, so a background job's unit fails on 1-3); still to do: `nandwash-check.timer` + service shipped in `contrib/`.
+5. ~~done~~ `report DRIVE --html [-o FILE] [--share]`: card, read-time histogram, disk map, history; one file, inline SVG + CSS, no JS, light/dark. `--share` drops serial, device, paths, hostname (tested).
+6. ~~done~~ Exit codes + `--on-result` (`_job-run` exits with the code, so a background job's unit fails on 1-3); `contrib/nandwash-check.{service,timer}` (monthly check, AC power only, `SuccessExitStatus=1`, deliberately no idle I/O class: queued reads look slow).
 7. ~~Calibrate the `slow-regions` line~~ done 2026-11-03 (B3); re-check on the mini's other two drives.
 
 ---

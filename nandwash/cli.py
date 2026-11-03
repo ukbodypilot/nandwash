@@ -651,6 +651,26 @@ def results_cmd(drive, show_history, as_json):
                       f"median       {res.spark([r.get('median_ms') for r in h['runs']])}", highlight=False)
 
 
+@main.command("report")
+@click.argument("drive")
+@click.option("--html", "as_html", is_flag=True, required=True, help="Self-contained HTML (the only format so far).")
+@click.option("-o", "output", type=click.Path(dir_okay=False), help="Write here instead of stdout.")
+@click.option("--share", is_flag=True, help="Safe to post: serial -> short id; no device names, paths, hostname.")
+def report_cmd(drive, as_html, output, share):
+    """One drive's latest result as an HTML page: card, read-time histogram, disk map, history."""
+    from . import html as hp, results as res
+    h = res.find(drive)
+    if not h:
+        raise click.ClickException(f"no results for {drive!r} yet")
+    page = hp.render(h, share=share)
+    if output:
+        with open(output, "w") as f:
+            f.write(page)
+        console.print(f"wrote {output}" + (" (shareable: no serial, paths or hostname)" if share else ""))
+    else:
+        click.echo(page)
+
+
 @main.command()
 @click.argument("device", required=False, type=click.Path(exists=True))
 def info(device):
