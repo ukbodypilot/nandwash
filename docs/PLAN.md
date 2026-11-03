@@ -1,6 +1,7 @@
 # nandwash end-state plan: from toolkit to application
 
-Status: draft 2026-11-03. Covers **A. picking drives** and **B. results**, both settled enough to build. Today nandwash is a set of expert commands (`scan`, `pick-slow`, `refresh-free`,
+Status: **built and released as v0.4.0 (2026-11-03)**; parts A and B are done, except the NVMe hardware test below. This
+file is kept as the design record: why each rule and threshold is what it is. Before it, nandwash was a set of expert commands (`scan`, `pick-slow`, `refresh-free`,
 `refresh-chunks`, `preboot`, `compare`) that someone has to chain correctly. The end state: the user picks
 **drives** and a **goal**; nandwash works out the steps per drive, shows the plan, runs it, and reports.
 
@@ -330,7 +331,10 @@ No email or chat integrations: each one is a dependency plus credentials to mana
 
 ## Release cut
 
-- **v0.3:** part A complete (check + live refresh + jobs/status/resume), state in `/var/lib/nandwash`, Python >= 3.11,
-  CI with loop-device tests, `pipx install --global` documented.
-- **v0.4:** part B (cards, history, HTML, timer); offline boot `preboot install` enabled for real once proven on .140 + the mini.
-- **Before either:** NVMe test on real hardware (all testing so far has been SATA).
+- **v0.3** (part A) and **v0.4** (part B) shipped together as **v0.4.0**: jobs, state in `/var/lib/nandwash`,
+  Python >= 3.11, `pipx install --global` documented, results/history/HTML/timer, offline boot `preboot install`
+  for real (the offline runner proven on .140 from a hand install; `preboot install` itself on the mini's system disk, twice) with its results imported into history.
+- CI runs the unit tests and pyflakes on Python 3.11-3.13. The loop-device acceptance test needs root, so it is
+  still run by hand (`sudo tests/acceptance_loop.sh`, PASS before the release).
+- **Still open:** an NVMe test on real hardware (everything so far has been SATA); publishing to PyPI (needs the
+  trusted publisher set up on pypi.org first); whether fixes *hold* over weeks, which only the history can answer.
