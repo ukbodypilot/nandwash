@@ -67,6 +67,11 @@ def card(h: dict, aliases: Optional[dict] = None) -> List[Tuple[str, str]]:
                f"read median {oc.get('median_before_ms')} -> {oc.get('median_after_ms')} ms")
         if oc.get("queued"):
             txt += f"; [bold]{oc['queued']} queued for the offline boot[/]"
+        cb = r.get("combined")
+        if cb and cb.get("outcome"):
+            txt += (f"\n         with the live refresh before it: {_c(cb['outcome'])} {cb['fixed']}/{cb['rewritten']} "
+                    f"fixed ({cb['live_fixed']}/{cb['live_rewritten']} live + {cb['offline_fixed']}/"
+                    f"{cb['offline_rewritten']} offline)")
         rows.append(("OUTCOME", txt))
         if oc.get("mismatch"):
             rows.append(("DATA", f"[bold red]READ-BACK MISMATCH on {oc['mismatch']} chunk(s)[/]: the job stopped there"))
@@ -99,6 +104,8 @@ def next_step(h: dict, r: dict) -> str:
     ref = alias_of(h["id"]) or h["id"]
     if st == "errors":
         return "[bold red]back up this drive now[/]; then look at `smartctl -a` before any refresh"
+    if r.get("goal") == "offline" and not r.get("state") and r.get("next"):
+        return r["next"]          # the boot aborted or failed: its log says why
     if oc == "incomplete" and r.get("next"):
         return r["next"]
     if st == "inconclusive":
@@ -143,6 +150,7 @@ def to_json(hs: List[dict], aliases: Optional[dict] = None, full: bool = False) 
                     "median_ms": r.get("median_ms"), "p99_ms": r.get("p99_ms"), "noise": r.get("noise"),
                     "candidates": r.get("candidates"), "confirmed": r.get("confirmed"), "severe": r.get("severe"),
                     "errors": r.get("errors"), "slow_again": r.get("slow_again"),
-                    "smart_counters": r.get("smart_counters"), "smart_notes": r.get("smart_notes") or [], "next": next_step(h, r).replace("[bold red]", "")
+                    "smart_counters": r.get("smart_counters"), "smart_notes": r.get("smart_notes") or [],
+                    "combined": r.get("combined"), "next": next_step(h, r).replace("[bold red]", "")
                     .replace("[/]", ""), **({"history": h["runs"]} if full else {})})
     return {"nandwash_result": RESULT_VERSION, "drives": out}

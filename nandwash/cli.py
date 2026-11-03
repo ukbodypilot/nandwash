@@ -87,11 +87,23 @@ def main(ctx, assume_ssd):
     if os.geteuid() == 0:
         from .state import import_legacy
         import_legacy(log=lambda m: console.print(f"[dim]{m}[/]", highlight=False))
+        _import_offline()
     if ctx.invoked_subcommand is None:
         if not sys.stdin.isatty():
             click.echo(ctx.get_help())
             return
         _interactive()
+
+
+def _import_offline() -> None:
+    """Offline boot results -> history, once per boot directory (offline.py). Never fails the command."""
+    if os.environ.get("NANDWASH_NO_IMPORT") == "1" and not os.environ.get("NANDWASH_MAINT_DIR"):
+        return                      # the offline boot itself, and tests that did not ask for it
+    try:
+        from . import offline
+        offline.import_all(log=lambda m: console.print(f"[dim]{m}[/]", highlight=False))
+    except Exception as e:          # noqa: BLE001 -- a broken results dir must not stop `status` or `run`
+        console.print(f"[dim]offline results not imported: {e}[/]", highlight=False)
 
 
 def parse_numbers(text: str, n: int) -> list:
@@ -432,7 +444,7 @@ def _run_job(job, background: bool, max_temp: int) -> None:
         import subprocess
         exe = [sys.executable, "-m", "nandwash", "_job-run", job["id"], "--max-temp", str(max_temp)]
         env = {k: os.environ[k] for k in ("NANDWASH_STATE", "NANDWASH_LOCK", "NANDWASH_TEST_LOOP", "NANDWASH_NO_IMPORT",
-                                          "PYTHONPATH", "HOME")
+                                          "NANDWASH_MAINT_DIR", "PYTHONPATH", "HOME")
                if k in os.environ}
         if shutil.which("systemd-run"):
             cmd = ["systemd-run", f"--unit=nandwash-job-{job['id']}", "--collect", "--quiet",
@@ -446,6 +458,17 @@ def _run_job(job, background: bool, max_temp: int) -> None:
             with open(os.path.join(jobs.job_dir(job["id"]), "runner.log"), "w") as log:
                 subprocess.Popen(exe, stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
             console.print(f"job {job['id']} running in the background (detached)")
+        # Return only once the runner has taken the job: a `status` straight after must not see the old
+        # paused/new state and exit at once (the acceptance test hit exactly that).
+        import time
+        before = jobs.effective_state(job)
+        for _ in range(100):
+            now = jobs.effective_state(jobs.load(job["id"]))
+            if now == "running" or (now != before and now not in ("paused", "interrupted")):
+                break
+            time.sleep(0.1)
+        else:
+            console.print(f"[yellow]the job has not started after 10 s; see {jobs.job_dir(job['id'])}/runner.log[/]")
         console.print("Watch: nandwash status   Stop: sudo nandwash cancel")
         return
     with Live(_job_table(job), console=console, refresh_per_second=2, screen=False) as live:
@@ -613,6 +636,14 @@ def results_cmd(drive, show_history, as_json):
     from rich.table import Table
     from rich import box
     from . import history as hist, results as res
+    if os.geteuid() != 0:
+        try:
+            from . import offline
+            n = len(offline.pending())
+        except OSError:
+            n = 0
+        if n:
+            console.print(f"[yellow]{n} offline boot result(s) not imported yet: run `sudo nandwash results` once[/]")
     if drive:
         h = res.find(drive)
         if not h:

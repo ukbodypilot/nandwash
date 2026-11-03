@@ -5,6 +5,7 @@
 # timed before and after), saves a report and reboots. Whatever happens, it ends in a reboot.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 export PYTHONDONTWRITEBYTECODE=1
+umask 022                          # PID 1 starts with umask 0: results would be world-writable, and root imports them
 CONF=/etc/nandwash/maint.conf      # written by `nandwash preboot install`; every value shell-quoted
 OUT=/var/lib/nandwash-maint
 W=/run/nw
@@ -103,6 +104,7 @@ dmesg 2>/dev/null | tail -n 200 > $W/dmesg.txt
 # 4. Save results (briefly remount rw: nothing else is running, work is finished).
 if mount -o remount,rw / 2>/dev/null; then
   D=$OUT/$(date +%Y%m%dT%H%M%S); mkdir -p "$D" && cp $W/log $W/*.out $W/report.json $W/slow.json $W/dmesg.txt "$D"/ 2>/dev/null
+  cp $CONF "$D"/maint.conf 2>/dev/null     # which drive + which scan: `nandwash results` imports this dir into history
   sync; mount -o remount,ro / 2>/dev/null; log "results saved to $D"
 else
   log "could not remount rw; results not saved (see console)"

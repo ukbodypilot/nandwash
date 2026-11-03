@@ -177,7 +177,11 @@ def render(h: dict, share: bool = False, aliases: Optional[dict] = None) -> str:
         out.append(f'<dt>Outcome</dt><dd><span class="pill s-{_e(oc["outcome"])}">{_e(oc["outcome"])}</span> '
                    f'{oc["fixed"]}/{oc["rewritten"]} fixed ({oc["fixed_pct"]:.0f}%); median '
                    f'{oc.get("median_before_ms")} → {oc.get("median_after_ms")} ms'
-                   + (f'; {oc["queued"]} wait for the offline boot' if oc.get("queued") else "") + '</dd>')
+                   + (f'; {oc["queued"]} wait for the offline boot' if oc.get("queued") else "")
+                   + (f'<br><small>with the live refresh before it: <span class="s-{_e(cb["outcome"])}">'
+                      f'{_e(cb["outcome"])}</span> {cb["fixed"]}/{cb["rewritten"]} fixed ({cb["live_fixed"]}/'
+                      f'{cb["live_rewritten"]} live + {cb["offline_fixed"]}/{cb["offline_rewritten"]} offline)</small>'
+                      if (cb := r.get("combined") or {}).get("outcome") else "") + '</dd>')
         out.append('<dt>Data</dt><dd>' + (f'<b class="s-errors">read-back MISMATCH on {oc["mismatch"]}</b>'
                                           if oc.get("mismatch") else
                                           f'read-back verified identical: {oc["verified"]}/{oc["verified"]}') + '</dd>')

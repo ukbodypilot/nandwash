@@ -287,6 +287,17 @@ should I refresh?". Almost nothing else tells users this, and it's the most usef
 `nandwash results DRIVE --history` shows a table plus a terminal sparkline of confirmed-slow count and median.
 The optional `nandwash-check.timer` (monthly `run --goal check --drives all`) feeds it.
 
+**Offline boots feed it too** (done 2026-11-03, `offline.py`). Each `/var/lib/nandwash-maint/<ts>/` is imported once,
+by the next root `nandwash` command, as a run with goal `offline` (job `offline-<ts>`). The drive is matched by
+serial: from `report.json`, from the `maint.conf` the boot now saves, or (older boots) from the log. The state is
+judged against the live scan the boot worked from. If the run before it was a live refresh left `incomplete`, the two
+are also judged as ONE refresh (`combined`). Checked on the mini sdb's real boot: offline 168/169 fixed, 7.55 -> 2.47 ms;
+with the live refresh 441/443, `improved`. That's the same as the hand count in B3. A directory or file that is a
+symlink, not owned by root, or writable by group/other is refused, since forged numbers would land in the history.
+The boot used to run with PID 1's umask 0, and the mini's 2026-11-03 results are mode 777/666. The script now sets
+`umask 022`; that old directory imports after `chmod -R go-w`. An aborted boot is recorded with its reason, with the
+serial and device names removed, and the card points to its log.
+
 ### B6. Output formats
 
 - **Terminal card** (B4).

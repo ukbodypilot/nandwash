@@ -40,6 +40,8 @@ def add_run(drive_id: str, serial: str, model: str, row: dict) -> dict:
     h.update(id=drive_id, serial=serial, model=model)
     # A resumed job finishing the same drive twice must not add two rows.
     h["runs"] = [r for r in h["runs"] if r.get("job") != row.get("job") or not row.get("job")] + [row]
+    # Date order: an offline boot is imported after the boot, possibly after a later run was already added.
+    h["runs"].sort(key=lambda r: r.get("date") or "")
     os.makedirs(history_dir(), exist_ok=True)
     tmp = _path(drive_id) + ".tmp"
     with open(tmp, "w") as f:

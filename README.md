@@ -163,6 +163,7 @@ Both are read-only. To install and run it once:
 sudo nandwash preboot install DEVICE              # writes the runner, conf, staged scan and one GRUB entry; no reboot
 sudo grub-reboot nandwash-maint && sudo reboot    # one-shot: the boot after it is the normal one again
 ls /var/lib/nandwash-maint/                        # one folder per run: log, slow.json, report.json, dmesg.txt
+sudo nandwash results                              # imports each run into the drive's history (goal `offline`)
 sudo nandwash preboot uninstall                    # remove the entry and files (results are kept)
 ```
 

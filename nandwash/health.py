@@ -176,14 +176,7 @@ def outcome(rows: Sequence[dict], med_us: float, queued: int = 0) -> Optional[di
         return None
     fixed = [r for r in ok if is_fixed(r.get("before_ms"), r.get("after_ms"), med_us)]
     share = len(fixed) / len(ok) if ok else 0.0
-    if queued:
-        oc = "incomplete"
-    elif share >= IMPROVED:
-        oc = "improved"
-    elif share >= PARTLY:
-        oc = "partly"
-    else:
-        oc = "no-effect"
+    oc = _classify(share, queued)
     b = sorted(r["before_ms"] for r in ok if r.get("before_ms") is not None)
     a = sorted(r["after_ms"] for r in ok if r.get("after_ms") is not None)
     return {"outcome": oc, "rewritten": len(ok), "fixed": len(fixed), "fixed_pct": round(100 * share, 1),
@@ -191,6 +184,26 @@ def outcome(rows: Sequence[dict], med_us: float, queued: int = 0) -> Optional[di
             "median_before_ms": round(pct(b, 50), 2) if b else None,
             "median_after_ms": round(pct(a, 50), 2) if a else None,
             "fixed_offsets": sorted(r["offset"] for r in fixed)}
+
+
+def _classify(share: float, queued: int) -> str:
+    if queued:
+        return "incomplete"
+    return "improved" if share >= IMPROVED else "partly" if share >= PARTLY else "no-effect"
+
+
+def combine(live: Optional[dict], offline: Optional[dict], with_job: str = "") -> dict:
+    """A live refresh that queued chunks + the offline boot that did them, judged as one refresh (same thresholds).
+    Medians are not combined (they are medians of different chunk sets); each part keeps its own."""
+    live, offline = live or {}, offline or {}
+    rewritten = live.get("rewritten", 0) + offline.get("rewritten", 0)
+    fixed = live.get("fixed", 0) + offline.get("fixed", 0)
+    share = fixed / rewritten if rewritten else 0.0
+    return {"outcome": _classify(share, 0) if rewritten else None, "with_job": with_job, "rewritten": rewritten,
+            "fixed": fixed, "fixed_pct": round(100 * share, 1), "live_fixed": live.get("fixed", 0),
+            "live_rewritten": live.get("rewritten", 0), "offline_fixed": offline.get("fixed", 0),
+            "offline_rewritten": offline.get("rewritten", 0),
+            "mismatch": live.get("mismatch", 0) + offline.get("mismatch", 0)}
 
 
 def exit_code(state: Optional[str], oc: Optional[str]) -> int:
