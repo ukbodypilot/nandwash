@@ -1,4 +1,4 @@
-"""Save/resume state in ~/.nandwash/<serial>.json."""
+"""Save/resume state in /var/lib/nandwash/progress/<serial>.json (+ .lat)."""
 from __future__ import annotations
 
 import json
@@ -7,16 +7,21 @@ import re
 from pathlib import Path
 from typing import Optional
 
-STATE_DIR = Path(os.path.expanduser("~")) / ".nandwash"
+STATE_DIR: Optional[Path] = None      # override (tests); default: state.VAR_DIR/progress
+
+
+def state_dir() -> Path:
+    from . import state
+    return Path(STATE_DIR) if STATE_DIR else Path(state.VAR_DIR) / "progress"
 
 
 def state_path(serial: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", serial)
-    return STATE_DIR / f"{safe}.json"
+    return state_dir() / f"{safe}.json"
 
 
 def save(serial: str, state: dict) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_dir().mkdir(parents=True, exist_ok=True)
     p = state_path(serial)
     tmp = p.with_suffix(".tmp")
     with open(tmp, "w") as f:
@@ -48,7 +53,7 @@ def latency_path(serial: str) -> Path:
 
 
 def save_latency(serial: str, arr) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_dir().mkdir(parents=True, exist_ok=True)
     p = latency_path(serial)
     tmp = p.with_suffix(".lat.tmp")
     with open(tmp, "wb") as f:

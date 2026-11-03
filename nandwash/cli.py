@@ -80,6 +80,9 @@ def main(assume_ssd):
     """SSD NAND cell refresh utility for Linux."""
     global _ASSUME_SSD
     _ASSUME_SSD = assume_ssd
+    if os.geteuid() == 0:
+        from .state import import_legacy
+        import_legacy(log=lambda m: console.print(f"[dim]{m}[/]", highlight=False))
 
 
 _CAP_COLS = (("check", "check"), ("live", "live"), ("offline-chunks", "chunks"), ("full", "full"),

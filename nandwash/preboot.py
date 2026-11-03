@@ -165,15 +165,10 @@ def time_budget(rep: dict, lat, factor: float = PICK_FACTOR, max_chunks: int = M
 
 
 def scan_report_dirs() -> list:
-    out = [os.path.expanduser("~/.nandwash/reports"), "/root/.nandwash/reports"]
-    su = os.environ.get("SUDO_USER")
-    if su:
-        try:
-            import pwd
-            out.append(os.path.join(pwd.getpwnam(su).pw_dir, ".nandwash/reports"))
-        except KeyError:
-            pass
-    return list(dict.fromkeys(out))
+    """Where scan reports live: the v0.3 state dir first, then the old ~/.nandwash/reports (not imported yet)."""
+    from .report import report_dir
+    from .state import legacy_dirs
+    return list(dict.fromkeys([str(report_dir())] + [os.path.join(d, "reports") for d in legacy_dirs()]))
 
 
 def find_scan_report(serial: str) -> str:

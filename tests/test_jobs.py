@@ -181,6 +181,33 @@ class ReportNames(unittest.TestCase):
             self.assertEqual(rpt.load(str(b))[1][0], 2.0)
 
 
+class LegacyImport(unittest.TestCase):
+    def test_copies_once_never_overwrites(self):
+        with tempfile.TemporaryDirectory() as d:
+            old_home, old_var = os.environ.get("HOME"), state.VAR_DIR
+            os.environ["HOME"], state.VAR_DIR = os.path.join(d, "home"), os.path.join(d, "var")
+            try:
+                os.makedirs(os.path.join(d, "home/.nandwash/reports"))
+                os.makedirs(os.path.join(d, "var/reports"))
+                for rel, body in (("reports/S-scan-1.json", "old"), ("reports/S-scan-1.lat", "L"),
+                                  ("reports/keep.json", "old"), ("S.json", "progress"), ("notes.txt", "x")):
+                    with open(os.path.join(d, "home/.nandwash", rel), "w") as f:
+                        f.write(body)
+                with open(os.path.join(d, "var/reports/keep.json"), "w") as f:
+                    f.write("new")
+                self.assertEqual(state.import_legacy(), 3)
+                with open(os.path.join(d, "var/reports/keep.json")) as f:
+                    self.assertEqual(f.read(), "new")
+                self.assertTrue(os.path.exists(os.path.join(d, "var/progress/S.json")))
+                self.assertFalse(os.path.exists(os.path.join(d, "var/progress/notes.txt")))
+                self.assertTrue(os.path.exists(os.path.join(d, "home/.nandwash/S.json")))     # copied, not moved
+                self.assertEqual(state.import_legacy(), 0)
+            finally:
+                state.VAR_DIR = old_var
+                if old_home is not None:
+                    os.environ["HOME"] = old_home
+
+
 class Verdict(unittest.TestCase):
     def test_rule(self):
         cs, med = 1048576, 1000.0

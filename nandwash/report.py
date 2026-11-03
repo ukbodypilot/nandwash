@@ -11,9 +11,12 @@ from typing import Optional
 
 from . import __version__
 from .engine import EngineState
-from .progress import STATE_DIR
+REPORT_DIR: Optional[Path] = None     # override (tests); default: state.VAR_DIR/reports
 
-REPORT_DIR = STATE_DIR / "reports"
+
+def report_dir() -> Path:
+    from . import state
+    return Path(REPORT_DIR) if REPORT_DIR else Path(state.VAR_DIR) / "reports"
 
 
 # ---- latency statistics ---------------------------------------------------------------
@@ -110,21 +113,22 @@ def build(st: EngineState, info, interrupted: bool) -> dict:
 
 
 def save(rep: dict, lat) -> Path:
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    rd = report_dir()
+    rd.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", rep["serial"])
     stamp = rep["created"].replace(":", "").replace("-", "")
     # Names are built by appending, never with_suffix(): a serial with a "." would lose everything after it.
     base = f"{safe}-{rep['mode']}-{stamp}"
     name, n = base, 1
-    while (REPORT_DIR / (name + ".json")).exists():  # never overwrite an earlier report
+    while (rd / (name + ".json")).exists():  # never overwrite an earlier report
         n += 1
         name = f"{base}-{n}"
     rep["latency_file"] = name + ".lat"
-    with open(REPORT_DIR / (name + ".json"), "w") as f:
+    with open(rd / (name + ".json"), "w") as f:
         json.dump(rep, f, indent=2)
-    with open(REPORT_DIR / (name + ".lat"), "wb") as f:
+    with open(rd / (name + ".lat"), "wb") as f:
         lat.tofile(f)
-    return REPORT_DIR / (name + ".json")
+    return rd / (name + ".json")
 
 
 def load(path: str):
