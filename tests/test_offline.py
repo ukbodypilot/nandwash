@@ -136,10 +136,32 @@ class Offline(unittest.TestCase):
     def test_unknown_drive_is_left_pending(self):
         os.remove(history._path("nw-9e1c2a"))
         self.boot()
-        with mock.patch.object(offline, "_drive_for", return_value=("", "")):
+        with mock.patch.object(offline, "drive_for", return_value=("", "")):
             got, msgs = self.run_import()
         self.assertEqual(got, [])
         self.assertIn("not attached", msgs[0])
+
+    def test_manual_refresh_free_is_recorded_and_combined_with_the_boot(self):
+        from types import SimpleNamespace
+        from nandwash import cli
+        os.remove(history._path("nw-9e1c2a"))
+        history.add_run("nw-9e1c2a", SER, "Micron_M500", {"date": "2026-11-03T09:00:00", "job": "j-check",
+                                                          "goal": "check", "median_ms": 2.3, "confirmed": 40})
+        res = {"results": [{"offset": i * CS, "status": "ok", "before_ms": 7.0, "after_ms": 2.4} for i in range(8)]}
+        d = SimpleNamespace(serial=SER, path="/dev/sdb")
+        with mock.patch.object(cli, "console"):
+            cli._record_manual(d, "refresh-free", res, [0], queued=30, next_="sudo nandwash preboot install /dev/sdb")
+            with mock.patch.dict(os.environ, {"NANDWASH_NO_HISTORY": "1"}):
+                cli._record_manual(d, "refresh-chunks", res, [0])          # inside the boot: nothing recorded
+        runs = history.load("nw-9e1c2a")["runs"]
+        self.assertEqual(len(runs), 2)
+        r = runs[-1]
+        self.assertEqual((r["goal"], r["outcome"]["outcome"], r["outcome"]["fixed"], r["outcome"]["queued"]),
+                         ("refresh-free", "incomplete", 8, 30))            # judged on the last check's 2.3 ms
+        history.add_run("nw-9e1c2a", SER, "Micron_M500", {**r, "date": "2026-11-03T09:50:00"})   # before the boot
+        self.boot()
+        (_, row), = self.run_import()[0]
+        self.assertEqual((row["combined"]["with_job"], row["combined"]["fixed"]), (r["job"], 8 + 29))
 
     def test_history_stays_in_date_order(self):
         history.add_run("nw-9e1c2a", SER, "Micron_M500", {"date": "2026-11-03T12:00:00", "job": "j-check",

@@ -163,7 +163,7 @@ def pending(maint_dir: Optional[str] = None) -> List[str]:
     return [d for d in boot_dirs(maint_dir) if f"offline-{os.path.basename(d)}" not in done]
 
 
-def _drive_for(serial: str) -> Tuple[str, str]:
+def drive_for(serial: str) -> Tuple[str, str]:
     """(short id, model) for a serial: from history first (the drive may be detached now), else attached drives."""
     for h in hist.all_drives():
         if h.get("serial") == serial:
@@ -188,7 +188,7 @@ def import_all(maint_dir: Optional[str] = None, log=print) -> List[Tuple[str, di
         if not b["serial"]:
             log(f"offline results {d} not imported: no drive serial recorded")
             continue
-        did, model = _drive_for(b["serial"])
+        did, model = drive_for(b["serial"])
         if not did:
             log(f"offline results {d} not imported: drive serial {b['serial']} is not attached and has no history")
             continue

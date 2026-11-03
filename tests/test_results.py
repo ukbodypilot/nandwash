@@ -60,6 +60,24 @@ class Results(unittest.TestCase):
         self.assertIn("preboot install", c["NEXT"])
         self.assertIn("data-m600", c[""])
 
+    def test_refresh_card_says_the_count_is_from_before_the_rewrite(self):
+        c = dict(results.card(history.load("nw-3f9a2c")))
+        self.assertIn("before the rewrite: 1240 confirmed", c["STATE"])
+        self.assertIn("190 of the 1240 still slow", c["OUTCOME"])            # 1240 - 1050 fixed
+        self.assertEqual(results.to_json(history.all_drives())["drives"][0]["still_slow"], 190)
+        history.add_run("nw-3f9a2c", "SER1", "Micron M600", {**ROW, "job": "j3", "next": "",
+                                                             "outcome": {**ROW["outcome"], "outcome": "improved"}})
+        self.assertIn("in a few weeks", dict(results.card(history.load("nw-3f9a2c")))["NEXT"])
+
+    def test_manual_row_is_not_judged_and_skipped_in_the_trend(self):
+        history.add_run("nw-3f9a2c", "SER1", "Micron M600", {
+            "date": "2026-11-03T15:00:00", "job": "manual-refresh-free-x", "goal": "refresh-free", "state": None,
+            "confirmed": None, "outcome": {**ROW["outcome"], "outcome": "improved", "queued": 0}})
+        c = dict(results.card(history.load("nw-3f9a2c")))
+        self.assertIn("not judged", c["STATE"])
+        self.assertIn("1610 -> 1240 confirmed slow over 2 runs", c["HISTORY"])
+        self.assertNotIn("still slow", c["OUTCOME"])
+
     def test_errors_card_says_back_up(self):
         history.add_run("nw-bad", "S2", "X", {**ROW, "job": "j9", "state": "errors",
                                               "why": "SMART 197 pending 0 -> 1", "outcome": None})

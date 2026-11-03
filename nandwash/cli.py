@@ -786,6 +786,38 @@ def refresh(device, resume, max_temp, yes, hash_data):
     _execute(device, "refresh", resume, max_temp, hash_data=hash_data)
 
 
+def _record_manual(d, goal: str, res: dict, src, queued: int = 0, next_: str = "") -> None:
+    """A standalone `refresh-free`/`refresh-chunks` run -> one history row, like a job's, so its fixes count in
+    "slow again" and a later offline boot reports the two together. Never fails the command."""
+    if os.environ.get("NANDWASH_NO_HISTORY") == "1":       # the offline boot: its results are imported afterwards
+        return
+    from datetime import datetime
+    from . import health, history as hist, offline
+    try:
+        did, model = offline.drive_for(d.serial)
+        if not did:
+            return
+        h = hist.load(did)
+        med_us = src.get("median_us") if isinstance(src, dict) else None
+        if not med_us:                     # a bare offset list: judge against the drive's last known median
+            last = next((r for r in reversed(h["runs"]) if r.get("median_ms")), None)
+            med_us = last["median_ms"] * 1000 if last else None
+        rows = health.rewrite_rows(res)
+        oc = health.outcome(rows, med_us, queued=queued) if med_us else None
+        if not rows and not queued:
+            return
+        now = datetime.now()
+        row = {"date": now.isoformat(timespec="seconds"), "job": f"manual-{goal}-{now:%Y%m%dT%H%M%S}",
+               "device": os.path.basename(d.path), "goal": goal, "steps": [goal], "complete": None,
+               "median_ms": round(med_us / 1000, 3) if med_us else None, "p99_ms": None, "errors": None,
+               "noise": None, "candidates": None, "confirmed": None, "severe": None, "state": None, "why": "",
+               "slow_again": None, "smart_counters": {}, "smart_notes": [], "outcome": oc, "next": next_}
+        hist.add_run(did, d.serial, model, row)
+        console.print(f"[dim]recorded in the history of {did} (`nandwash results {did}`)[/]")
+    except Exception as e:                 # the rewrite is done and verified; history is a bonus
+        console.print(f"[yellow]not recorded in history: {e}[/]")
+
+
 @main.command("refresh-chunks")
 @click.argument("device", type=click.Path(exists=True))
 @click.argument("chunks_file", type=click.Path(exists=True))
@@ -828,6 +860,7 @@ def refresh_chunks_cmd(device, chunks_file, allow_readonly_mounts, report, backu
     console.print(f"{res['chunks_ok']}/{res['chunks_requested']} chunks rewritten and verified; median read "
                   f"{res['median_before_ms']} -> {res['median_after_ms']} ms" +
                   (f"\n[red]STOPPED: {res['stopped']}[/]" if res["stopped"] else ""))
+    _record_manual(d, "refresh-chunks", res, data)
     if res["stopped"]:
         sys.exit(2)
 
@@ -921,6 +954,9 @@ def refresh_free_cmd(device, chunks_file, scan_report, factor, dry_run, max_chun
                   f"{res.get('median_before_ms')} -> {res.get('median_after_ms')} ms; longest freeze {res.get('max_frozen_ms')} ms")
     for r in skipped:
         console.print(f"  [yellow]{r['offset']}: {r['status']}[/]")
+    used = res["states"].get("used", 0)
+    _record_manual(d, "refresh-free", res, data if chunks_file else picked, queued=used,
+                   next_=f"sudo nandwash preboot check {d.path} && sudo nandwash preboot install {d.path}" if used else "")
     if res["stopped"]:
         console.print(f"[red]STOPPED: {res['stopped']}[/]")
         sys.exit(2)

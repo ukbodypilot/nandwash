@@ -39,6 +39,18 @@ def spark(vals: List[Optional[float]]) -> str:
                    for x in vals)
 
 
+MANUAL_GOALS = ("refresh-free", "refresh-chunks")     # rows written by the standalone commands, not by a job
+
+
+def still_slow(r: dict) -> Optional[int]:
+    """Confirmed slow chunks a refresh run did not fix (queued ones included). None when the run rewrote nothing
+    or did not re-read the drive first. An estimate: the next check job re-reads the whole drive."""
+    oc = r.get("outcome") or {}
+    if not oc or r.get("confirmed") is None:
+        return None
+    return max(0, r["confirmed"] - oc.get("fixed", 0))
+
+
 def _c(word: Optional[str]) -> str:
     if not word:
         return "-"
@@ -55,16 +67,23 @@ def card(h: dict, aliases: Optional[dict] = None) -> List[Tuple[str, str]]:
     nz = r.get("noise") or {}
     noise = (f", noise {nz['p5']:.2f}-{nz['p95']:.2f}" if nz.get("n") else "")
     med = f", median {r['median_ms']:.2f} ms" if r.get("median_ms") else ""
+    oc = r.get("outcome")
     if r.get("confirmed") is not None:
         detail = f"{r['confirmed']} confirmed slow of {r.get('candidates', 0)} candidates ({r.get('severe', 0)} above 3x){med}{noise}"
+        if oc:      # the re-reads ran before the rewrite: say so, or a fixed drive reads as still slow
+            detail = "before the rewrite: " + detail
+    elif r.get("goal") in MANUAL_GOALS:
+        detail = f"not judged: `{r['goal']}` rewrites the chunks it is given, it does not re-read the drive"
     else:
         detail = f"no re-reads in this run{med}"
     rows.append(("STATE", f"{_c(r.get('state'))}   {detail}" + (f"\n         {r['why']}" if r.get("why") and
                                                                     r.get("state") in ("errors", "inconclusive") else "")))
-    oc = r.get("outcome")
     if oc:
         txt = (f"{_c(oc['outcome'])}   {oc['fixed']}/{oc['rewritten']} fixed ({oc['fixed_pct']:.0f}%); "
                f"read median {oc.get('median_before_ms')} -> {oc.get('median_after_ms')} ms")
+        left = still_slow(r)
+        if left is not None:
+            txt += f"; {left} of the {r['confirmed']} still slow after this run"
         if oc.get("queued"):
             txt += f"; [bold]{oc['queued']} queued for the offline boot[/]"
         cb = r.get("combined")
@@ -86,8 +105,8 @@ def card(h: dict, aliases: Optional[dict] = None) -> List[Tuple[str, str]]:
     sa = r.get("slow_again")
     runs = h["runs"]
     if len(runs) > 1 or sa:
-        conf = [x.get("confirmed") for x in runs]
-        line = " -> ".join("?" if c is None else str(c) for c in conf[-6:]) + f" confirmed slow over {len(runs)} runs"
+        conf = [x["confirmed"] for x in runs if x.get("confirmed") is not None]   # manual rewrites re-read nothing
+        line = " -> ".join(str(c) for c in conf[-6:]) + f" confirmed slow over {len(conf)} runs"
         if sa:
             line += (f"; {sa['count']} of {sa['of']} earlier fixes slow again"
                      + (f" ({sa['days_since_fix_min']:.0f}-{sa['days_since_fix_max']:.0f} days after the fix)"
@@ -114,6 +133,9 @@ def next_step(h: dict, r: dict) -> str:
         return f"sudo nandwash run --drives {ref} --goal refresh"
     if oc == "no-effect":
         return "this drive may skip identical writes; see the write-evidence counters in the rewrite report"
+    if oc in ("improved", "partly"):
+        # A fresh scan right away always finds a few new stragglers; what matters is whether the fixes HOLD.
+        return f"in a few weeks: sudo nandwash run --drives {ref} --goal check   (shows how many fixes held)"
     return ""
 
 
@@ -151,6 +173,6 @@ def to_json(hs: List[dict], aliases: Optional[dict] = None, full: bool = False) 
                     "candidates": r.get("candidates"), "confirmed": r.get("confirmed"), "severe": r.get("severe"),
                     "errors": r.get("errors"), "slow_again": r.get("slow_again"),
                     "smart_counters": r.get("smart_counters"), "smart_notes": r.get("smart_notes") or [],
-                    "combined": r.get("combined"), "next": next_step(h, r).replace("[bold red]", "")
+                    "combined": r.get("combined"), "still_slow": still_slow(r), "next": next_step(h, r).replace("[bold red]", "")
                     .replace("[/]", ""), **({"history": h["runs"]} if full else {})})
     return {"nandwash_result": RESULT_VERSION, "drives": out}

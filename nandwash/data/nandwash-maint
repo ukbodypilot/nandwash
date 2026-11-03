@@ -64,7 +64,7 @@ fi
 NW=${NW:-/opt/nandwash/venv/bin/nandwash}
 NWPY=$(dirname "$NW")/python3
 export HOME=$W                                  # anything nandwash writes goes to tmpfs; root is read-only
-export NANDWASH_STATE=$W/state NANDWASH_LOCK=$W/lock NANDWASH_NO_IMPORT=1   # state too; no report import here
+export NANDWASH_STATE=$W/state NANDWASH_LOCK=$W/lock NANDWASH_NO_IMPORT=1 NANDWASH_NO_HISTORY=1  # state too; no report import here
 step() { # name timeout cmd...
   local n=$1 t=$2; shift 2
   log "step $n: start (limit ${t}s)"
