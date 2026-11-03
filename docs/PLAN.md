@@ -211,8 +211,23 @@ re-read/scan ratios (p5..p95). On sda that is about 0.95..1.10. This costs ~1-2 
 | `slow-regions` | confirmed slow > **0.1%** of chunks: refresh recommended (card states how many and where) |
 | `healthy` | otherwise |
 
-sda: 392 of 114,474 = 0.34%, so `slow-regions`. The 0.1% line is a **starting value**: calibrate it on the mini's three
-drives (M500, M600, T-FORCE) before v0.4, and record the calibration data in this file.
+The 0.1% line is a **starting value** and the first calibration (2026-11-03, below) says it is wrong: both drives
+measured so far land under it, although they differ by 25x. Recalibrate on more drives before v0.4.
+
+Calibration data, re-read confirmation (pick-slow, median of 3, isolated re-reads unbiased: ratio p50 0.98-0.99,
+p95 1.03-1.04, 0/200 false positives on both drives):
+
+| drive | candidates | confirmed | share | notes |
+|---|---|---|---|---|
+| .140 sda, Kingston SV300 120 GB | 965 | 5 | 0.004% | 392 were slow in BOTH scans of 2026-11-02; only ~64 rewritten since, yet 1 of the 392 is still slow. Cause unverified |
+| mini sdb, Crucial M500 480 GB | 4786 | 445 | 0.097% | confirmed scan latency p50 7.6 ms, max 36.7 ms; every >100x read was transient |
+
+- mini sdb by band: 1.8-3x 208/2151 confirmed, 3-5x 134/1370, 5-10x 102/1000, 10-100x 1/253, >100x 0/12.
+- mini sdb confirmed chunks by filesystem state (GETFSMAP, read-only): **275 free** (rewritable live), **170 used**
+  (150 file data, 1 group metadata, 19 partial). 255 of the 445 lie past 460 GB on a 7%-used disk; 190 of those are free.
+- Lessons: (1) a scan goes stale within hours, so confirm right after the scan, never from an old report;
+  (2) the per-boot 500-chunk cap is redundant with the time budget; (3) the state rule probably needs count + severity
+  (for example "> 0.01% or any chunk > 5x confirmed"), not one percentage.
 
 **Refresh outcome** (only after a refresh):
 
