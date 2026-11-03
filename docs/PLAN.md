@@ -208,11 +208,14 @@ re-read/scan ratios (p5..p95). On sda that is about 0.95..1.10. This costs ~1-2 
 |---|---|
 | `errors` | any unreadable sector, or SMART reallocated / pending / uncorrectable counts increased since the previous run. Card leads with **back up now**. |
 | `inconclusive` | scan incomplete, or noise band too wide (B2) |
-| `slow-regions` | confirmed slow > **0.1%** of chunks: refresh recommended (card states how many and where) |
+| `slow-regions` | confirmed slow >= **max(20, 0.01% of chunks)**, **or** >= **5** confirmed chunks above **3x median**: refresh recommended (card states how many, how slow, and where) |
 | `healthy` | otherwise |
 
-The 0.1% line is a **starting value** and the first calibration (2026-11-03, below) says it is wrong: both drives
-measured so far land under it, although they differ by 25x. Recalibrate on more drives before v0.4.
+`healthy` with a few mild slow chunks shows them as a note ("5 chunks at 1.8-1.9x: within noise of the line"), no advice.
+
+The rule was settled on 2026-11-03 from the data below. The first draft (> 0.1%) put both drives in `healthy`,
+although they differ by 25x. With the rule above: sda (5 chunks, all 1.8-1.9x) is `healthy`; mini sdb (445 chunks,
+237 above 3x) is `slow-regions`. Both thresholds are config values; re-check them as more drives are measured.
 
 Calibration data, re-read confirmation (pick-slow, median of 3, isolated re-reads unbiased: ratio p50 0.98-0.99,
 p95 1.03-1.04, 0/200 false positives on both drives):
@@ -225,9 +228,13 @@ p95 1.03-1.04, 0/200 false positives on both drives):
 - mini sdb by band: 1.8-3x 208/2151 confirmed, 3-5x 134/1370, 5-10x 102/1000, 10-100x 1/253, >100x 0/12.
 - mini sdb confirmed chunks by filesystem state (GETFSMAP, read-only): **275 free** (rewritable live), **170 used**
   (150 file data, 1 group metadata, 19 partial). 255 of the 445 lie past 460 GB on a 7%-used disk; 190 of those are free.
+- mini sdb refresh, 2026-11-03: live `refresh-free` rewrote the 274 free chunks (273 `fixed`, median 7.41 -> 2.42 ms,
+  longest freeze 268 ms); the one-shot offline boot then re-confirmed 169 and rewrote them (168 `fixed`, 7.55 -> 2.47 ms,
+  ~3 min away from the network). Re-check against the same scan: **445 -> 3 confirmed**, state `slow-regions` -> `healthy`,
+  outcome `improved` (441/443 fixed). SMART 5/187/196/197/198 unchanged.
 - Lessons: (1) a scan goes stale within hours, so confirm right after the scan, never from an old report;
-  (2) the per-boot 500-chunk cap is redundant with the time budget; (3) the state rule probably needs count + severity
-  (for example "> 0.01% or any chunk > 5x confirmed"), not one percentage.
+  (2) the per-boot 500-chunk cap is redundant with the time budget; (3) the state rule needs count + severity,
+  not one percentage (settled above).
 
 **Refresh outcome** (only after a refresh):
 
@@ -291,7 +298,7 @@ No email or chat integrations: each one is a dependency plus credentials to mana
 4. `results` (card + one-line list + `--history`), `--json` schema + a test that pins it.
 5. `report --html` with inline SVG, plus `--share`.
 6. Exit codes, `--on-result`, `nandwash-check.timer` + service shipped in `contrib/`.
-7. Calibrate the 0.1% `slow-regions` line on the mini's three drives; record the data here.
+7. ~~Calibrate the `slow-regions` line~~ done 2026-11-03 (B3); re-check on the mini's other two drives.
 
 ---
 
