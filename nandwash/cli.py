@@ -437,15 +437,24 @@ def _confirm_writes(pairs, yes: bool) -> None:
         click.confirm("This plan WRITES to the drives above. Start?", abort=True)
 
 
+# What a --background runner inherits. systemd-run starts from a clean environment, so anything the foreground
+# command was run with has to be passed on by name. PYTHONDONTWRITEBYTECODE: running from a temp copy (as on the mini)
+# must not leave root-owned __pycache__ behind that the copy's owner cannot remove.
+RUNNER_ENV = ("NANDWASH_STATE", "NANDWASH_LOCK", "NANDWASH_TEST_LOOP", "NANDWASH_NO_IMPORT", "NANDWASH_MAINT_DIR",
+              "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "HOME")
+
+
+def _runner_env() -> dict:
+    return {k: os.environ[k] for k in RUNNER_ENV if k in os.environ}
+
+
 def _run_job(job, background: bool, max_temp: int) -> None:
     jobs = _jobs()
     if background:
         import shutil
         import subprocess
         exe = [sys.executable, "-m", "nandwash", "_job-run", job["id"], "--max-temp", str(max_temp)]
-        env = {k: os.environ[k] for k in ("NANDWASH_STATE", "NANDWASH_LOCK", "NANDWASH_TEST_LOOP", "NANDWASH_NO_IMPORT",
-                                          "NANDWASH_MAINT_DIR", "PYTHONPATH", "HOME")
-               if k in os.environ}
+        env = _runner_env()
         if shutil.which("systemd-run"):
             cmd = ["systemd-run", f"--unit=nandwash-job-{job['id']}", "--collect", "--quiet",
                    "-p", f"StandardOutput=truncate:{jobs.job_dir(job['id'])}/runner.log", "-p", "StandardError=inherit"]
