@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `preboot uninstall` now also removes `/etc/nandwash` when it is left empty (it kept the empty folder). A folder
+  that still holds other files is left alone.
+
 ## 0.4.0 — 2026-11-03
 
 Results: nandwash now says what state a drive is in and whether a refresh helped, and remembers it.

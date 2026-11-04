@@ -111,5 +111,37 @@ class T(unittest.TestCase):
             pb.plan(r)
 
 
+class Uninstall(unittest.TestCase):
+    def _paths(self, d):
+        from unittest import mock
+        conf = os.path.join(d, "etc", "nandwash", "maint.conf")
+        os.makedirs(os.path.dirname(conf)); open(conf, "w").close()
+        grub = os.path.join(d, "grub"); os.makedirs(grub)
+        return [mock.patch.object(pb, "CONF_PATH", conf), mock.patch.object(pb, "MAINT_PATH", os.path.join(d, "maint")),
+                mock.patch.object(pb, "INPUT_DIR", os.path.join(d, "input"))], conf, grub
+
+    def test_removes_the_conf_dir_it_created(self):
+        with tempfile.TemporaryDirectory() as d:
+            ps, conf, grub = self._paths(d)
+            for x in ps: x.start()
+            try:
+                pb.uninstall(grub, log=lambda *_: None)
+            finally:
+                for x in ps: x.stop()
+            self.assertFalse(os.path.exists(os.path.dirname(conf)))
+
+    def test_keeps_the_conf_dir_if_something_else_is_in_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            ps, conf, grub = self._paths(d)
+            other = os.path.join(os.path.dirname(conf), "chunks.json"); open(other, "w").close()
+            for x in ps: x.start()
+            try:
+                pb.uninstall(grub, log=lambda *_: None)
+            finally:
+                for x in ps: x.stop()
+            self.assertFalse(os.path.exists(conf))
+            self.assertTrue(os.path.exists(other))
+
+
 if __name__ == "__main__":
     unittest.main()
