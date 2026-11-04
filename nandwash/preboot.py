@@ -617,6 +617,9 @@ def uninstall(grub_dir: str, log=print) -> None:
     for p in (MAINT_PATH, CONF_PATH):
         if os.path.exists(p):
             os.remove(p); log(f"removed {p}")
+    conf_dir = os.path.dirname(CONF_PATH)          # install created it; leave it only if something else is in it
+    if os.path.isdir(conf_dir) and not os.listdir(conf_dir):
+        os.rmdir(conf_dir); log(f"removed {conf_dir}")
     if os.path.isdir(INPUT_DIR):
         shutil.rmtree(INPUT_DIR); log(f"removed {INPUT_DIR}")
     env = os.path.join(grub_dir, "grubenv")
